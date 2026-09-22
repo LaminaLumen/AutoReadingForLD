@@ -1,6 +1,6 @@
 {
   "name": "auto-reading-for-ld",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "面向 LINUX DO 长帖的多模式自动阅读用户脚本",
   "license": "MIT",

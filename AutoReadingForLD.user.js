@@ -2,7 +2,7 @@
 // @name         AutoReadingForLD
 // @name:zh-CN   AutoReadingForLD - LINUX DO 沉浸阅读助手
 // @namespace    https://github.com/LaminaLumen/AutoReadingForLD
-// @version      2.0.0
+// @version      2.0.1
 // @description  为 LINUX DO 长帖提供自然节奏滚动、三种阅读模式、懒加载等待与沉浸式控制面板。
 // @author       pboy, LaminaLumen contributors
 // @license      MIT
@@ -26,7 +26,7 @@
 
     const APP = Object.freeze({
         name: 'AutoReadingForLD',
-        version: '2.0.0',
+        version: '2.0.1',
         rootId: 'auto-reading-for-ld-root',
         storageKey: 'auto-reading-for-ld:settings:v2',
         queueStorageKey: 'auto-reading-for-ld:queue:v1',
@@ -34,9 +34,12 @@
     });
 
     const CONFIG = Object.freeze({
-        defaultSpeed: 52,
+        // 原版最低档为 0.5 px/frame，按常见的 60Hz 刷新率折算约为 30 px/s。
+        defaultSpeed: 30,
+        settingsRevision: 1,
         minSpeed: 12,
         maxSpeed: 160,
+        speedSliderStep: 2,
         speedStep: 4,
         speedVariationMin: 0.88,
         speedVariationMax: 1.12,
@@ -55,7 +58,7 @@
     });
 
     const SPEED_PRESETS = Object.freeze([
-        { key: 'focus', label: '沉浸', speed: 28 },
+        { key: 'focus', label: '沉浸', speed: 30 },
         { key: 'steady', label: '标准', speed: 52 },
         { key: 'skim', label: '速览', speed: 96 }
     ]);
@@ -142,6 +145,7 @@
     const StorageManager = {
         defaults() {
             return {
+                settingsRevision: CONFIG.settingsRevision,
                 speed: CONFIG.defaultSpeed,
                 mode: 'single',
                 queueLimit: CONFIG.queueDefaultItems,
@@ -162,6 +166,7 @@
                 : null;
 
             return {
+                settingsRevision: CONFIG.settingsRevision,
                 speed: clamp(
                     isFiniteNumber(value?.speed) ? value.speed : defaults.speed,
                     CONFIG.minSpeed,
@@ -209,7 +214,23 @@
             try {
                 const savedText = localStorage.getItem(APP.storageKey);
                 if (savedText) {
-                    return this.normalize(JSON.parse(savedText));
+                    const saved = JSON.parse(savedText);
+                    const needsDefaultSpeedMigration = (
+                        (!Number.isInteger(saved?.settingsRevision)
+                            || saved.settingsRevision < CONFIG.settingsRevision)
+                        && saved?.speed === 52
+                    );
+                    const normalized = this.normalize({
+                        ...saved,
+                        speed: needsDefaultSpeedMigration ? CONFIG.defaultSpeed : saved?.speed
+                    });
+
+                    // 2.0.0 的 52 px/s 是旧默认值；仅迁移未标记的旧配置，用户之后手动选择 52 不受影响。
+                    if (needsDefaultSpeedMigration || saved?.settingsRevision !== CONFIG.settingsRevision) {
+                        this.save(normalized);
+                    }
+
+                    return normalized;
                 }
 
                 const migrated = this.migrateLegacy();
@@ -241,6 +262,7 @@
         article: '<path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,160H40V56H216V200ZM184,96a8,8,0,0,1-8,8H80a8,8,0,0,1,0-16h96A8,8,0,0,1,184,96Zm0,32a8,8,0,0,1-8,8H80a8,8,0,0,1,0-16h96A8,8,0,0,1,184,128Zm0,32a8,8,0,0,1-8,8H80a8,8,0,0,1,0-16h96A8,8,0,0,1,184,160Z"/>',
         playCircle: '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm48.24-94.78-64-40A8,8,0,0,0,100,88v80a8,8,0,0,0,12.24,6.78l64-40a8,8,0,0,0,0-13.56ZM116,153.57V102.43L156.91,128Z"/>',
         bookOpenText: '<path d="M232,48H160a40,40,0,0,0-32,16A40,40,0,0,0,96,48H24a8,8,0,0,0-8,8V200a8,8,0,0,0,8,8H96a24,24,0,0,1,24,24,8,8,0,0,0,16,0,24,24,0,0,1,24-24h72a8,8,0,0,0,8-8V56A8,8,0,0,0,232,48ZM96,192H32V64H96a24,24,0,0,1,24,24V200A39.81,39.81,0,0,0,96,192Zm128,0H160a39.81,39.81,0,0,0-24,8V88a24,24,0,0,1,24-24h64ZM160,88h40a8,8,0,0,1,0,16H160a8,8,0,0,1,0-16Zm48,40a8,8,0,0,1-8,8H160a8,8,0,0,1,0-16h40A8,8,0,0,1,208,128Zm0,32a8,8,0,0,1-8,8H160a8,8,0,0,1,0-16h40A8,8,0,0,1,208,160Z"/>',
+        checkCircle: '<path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm45.66-117.66a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34Z"/>',
         minus: '<path d="M224,128a8,8,0,0,1-8,8H40a8,8,0,0,1,0-16H216A8,8,0,0,1,224,128Z"/>',
         play: '<path d="M232.4,114.49,88.32,26.35a16,16,0,0,0-16.2-.3A15.86,15.86,0,0,0,64,39.87V216.13A15.94,15.94,0,0,0,80,232a16.07,16.07,0,0,0,8.36-2.35L232.4,141.51a15.81,15.81,0,0,0,0-27ZM80,215.94V40l143.83,88Z"/>',
         pause: '<path d="M200,32H160a16,16,0,0,0-16,16V208a16,16,0,0,0,16,16h40a16,16,0,0,0,16-16V48A16,16,0,0,0,200,32Zm0,176H160V48h40ZM96,32H56A16,16,0,0,0,40,48V208a16,16,0,0,0,16,16H96a16,16,0,0,0,16-16V48A16,16,0,0,0,96,32Zm0,176H56V48H96Z"/>',
@@ -277,24 +299,31 @@
     shadow.innerHTML = `
         <style>
             :host {
-                --surface: #f7f4ec;
-                --surface-raised: #fffdf8;
-                --rail: #f0eee6;
-                --rail-selected: #e7ebe4;
-                --ink: #263029;
-                --muted: #6d756f;
-                --faint: #969d97;
-                --line: #dcddd5;
-                --line-strong: #c9cdc4;
-                --forest: #315f4e;
-                --forest-deep: #24493d;
-                --forest-soft: #e4ebe6;
-                --action: #315f4e;
-                --action-hover: #24493d;
-                --terracotta: #b96849;
-                --terracotta-soft: #f3e7df;
-                --danger: #94513f;
-                --shadow: 0 18px 44px rgba(33, 43, 36, 0.16), 0 3px 10px rgba(33, 43, 36, 0.08);
+                --page-surface: #ffffff;
+                --page-ink: #222222;
+                --page-muted: #6f7478;
+                --page-line: #e2e5e7;
+                --page-accent: #168bd2;
+                --surface: color-mix(in srgb, var(--page-surface) 96%, var(--page-ink));
+                --surface-raised: color-mix(in srgb, var(--page-surface) 99%, var(--page-ink));
+                --rail: color-mix(in srgb, var(--page-surface) 94%, var(--page-ink));
+                --rail-selected: color-mix(in srgb, var(--page-surface) 89%, var(--page-accent));
+                --ink: var(--page-ink);
+                --muted: var(--page-muted);
+                --faint: color-mix(in srgb, var(--page-muted) 72%, var(--page-surface));
+                --line: var(--page-line);
+                --line-strong: color-mix(in srgb, var(--page-line) 72%, var(--page-ink));
+                --forest: var(--page-accent);
+                --forest-deep: color-mix(in srgb, var(--page-accent) 76%, var(--page-ink));
+                --forest-soft: color-mix(in srgb, var(--page-surface) 88%, var(--page-accent));
+                --action: var(--page-accent);
+                --action-hover: color-mix(in srgb, var(--page-accent) 84%, var(--page-ink));
+                --terracotta: var(--page-accent);
+                --terracotta-soft: color-mix(in srgb, var(--page-surface) 86%, var(--page-accent));
+                --danger: #b6534b;
+                --success: #438765;
+                --warning: #b57632;
+                --shadow: 0 18px 44px color-mix(in srgb, var(--page-ink) 15%, transparent), 0 3px 10px color-mix(in srgb, var(--page-ink) 8%, transparent);
                 color: var(--ink);
                 color-scheme: light;
                 font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -305,24 +334,15 @@
             }
 
             :host([data-theme="dark"]) {
-                --surface: #1d221e;
-                --surface-raised: #242a25;
-                --rail: #191e1a;
-                --rail-selected: #29332c;
-                --ink: #ece8de;
-                --muted: #aab2ab;
-                --faint: #7c867e;
-                --line: #343c36;
-                --line-strong: #465048;
-                --forest: #78a18e;
-                --forest-deep: #8db39f;
-                --forest-soft: #2b3b32;
-                --action: #3f6f5c;
-                --action-hover: #4a806a;
-                --terracotta: #ce8262;
-                --terracotta-soft: #3d2e27;
-                --danger: #e0a08a;
-                --shadow: 0 22px 52px rgba(0, 0, 0, 0.42), 0 3px 12px rgba(0, 0, 0, 0.28);
+                --page-surface: #1e2124;
+                --page-ink: #e9ecef;
+                --page-muted: #a3a9ae;
+                --page-line: #373c40;
+                --page-accent: #49a9df;
+                --danger: #e39a91;
+                --success: #70b58d;
+                --warning: #d6a15e;
+                --shadow: 0 22px 52px rgba(0, 0, 0, 0.42), 0 3px 12px rgba(0, 0, 0, 0.25);
                 color-scheme: dark;
             }
 
@@ -360,6 +380,7 @@
 
             .shell {
                 --speed-progress: 0%;
+                --state-color: var(--muted);
                 width: 336px;
                 user-select: none;
             }
@@ -578,9 +599,10 @@
                 display: flex;
                 align-items: center;
                 gap: 7px;
-                color: var(--forest-deep);
+                color: var(--state-color);
                 font-size: 12px;
                 font-weight: 700;
+                transition: color 160ms ease;
             }
 
             .state-dot {
@@ -588,8 +610,9 @@
                 height: 7px;
                 flex: 0 0 auto;
                 border-radius: 50%;
-                background: var(--forest);
-                box-shadow: 0 0 0 3px var(--forest-soft);
+                background: var(--state-color);
+                box-shadow: 0 0 0 3px color-mix(in srgb, var(--state-color) 16%, transparent);
+                transition: background 160ms ease, box-shadow 160ms ease;
             }
 
             .hero__title {
@@ -635,8 +658,8 @@
                 border: 1px solid var(--action);
                 border-radius: 8px;
                 background: var(--action);
-                color: #fffdf8;
-                box-shadow: 0 5px 12px rgba(36, 73, 61, 0.16);
+                color: var(--page-surface);
+                box-shadow: 0 5px 12px color-mix(in srgb, var(--action) 24%, transparent);
                 font-size: 14.5px;
                 font-weight: 720;
                 letter-spacing: 0.02em;
@@ -650,7 +673,7 @@
 
             .main-control:hover {
                 background: var(--action-hover);
-                box-shadow: 0 6px 15px rgba(36, 73, 61, 0.2);
+                box-shadow: 0 6px 15px color-mix(in srgb, var(--action) 30%, transparent);
             }
 
             .main-control:active {
@@ -1081,47 +1104,124 @@
             .dock {
                 position: relative;
                 display: none;
-                width: 46px;
-                height: 46px;
-                place-items: center;
-                padding: 2px;
-                border: 0;
-                border-radius: 12px;
-                background: conic-gradient(
-                    var(--terracotta) 0 var(--progress, 0deg),
-                    var(--line-strong) var(--progress, 0deg) 1turn
-                );
-                color: var(--forest-deep);
+                grid-template-columns: 36px minmax(0, 1fr);
+                width: 116px;
+                height: 44px;
+                align-items: center;
+                gap: 8px;
+                padding: 3px 10px 3px 3px;
+                overflow: hidden;
+                border: 1px solid var(--line-strong);
+                border-radius: 999px;
+                background: var(--surface-raised);
+                color: var(--ink);
                 box-shadow: var(--shadow);
                 cursor: grab;
+                isolation: isolate;
                 touch-action: none;
+                transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
             }
 
             .dock::before {
                 position: absolute;
-                inset: 2px;
-                border-radius: 10px;
-                background: var(--surface-raised);
-                box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 82%, transparent);
+                z-index: -1;
+                inset: 0;
+                border-radius: inherit;
+                background: linear-gradient(
+                    120deg,
+                    color-mix(in srgb, var(--surface-raised) 92%, var(--page-accent)) 0%,
+                    var(--surface-raised) 38%,
+                    var(--surface-raised) 100%
+                );
                 content: "";
             }
 
-            .dock__icon {
-                position: relative;
-                z-index: 1;
-                font-size: 22px;
+            .dock:hover {
+                border-color: color-mix(in srgb, var(--state-color) 48%, var(--line-strong));
+                box-shadow: 0 16px 36px color-mix(in srgb, var(--page-ink) 18%, transparent), 0 3px 9px color-mix(in srgb, var(--page-ink) 8%, transparent);
+                transform: translateY(-1px);
             }
 
-            .dock__status {
-                position: absolute;
-                z-index: 2;
-                right: 7px;
-                bottom: 7px;
-                width: 6px;
-                height: 6px;
-                border: 1px solid var(--surface-raised);
+            .dock:active {
+                transform: translateY(0);
+            }
+
+            .dock__glyph {
+                position: relative;
+                z-index: 1;
+                display: grid;
+                width: 36px;
+                height: 36px;
+                place-items: center;
                 border-radius: 50%;
-                background: var(--faint);
+                background: conic-gradient(
+                    var(--state-color) 0 var(--progress, 0deg),
+                    var(--line) var(--progress, 0deg) 1turn
+                );
+                color: var(--state-color);
+            }
+
+            .dock__glyph::before {
+                position: absolute;
+                width: 30px;
+                height: 30px;
+                border-radius: 50%;
+                background: var(--surface-raised);
+                box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 76%, transparent);
+                content: "";
+            }
+
+            .dock__state-icon,
+            .dock__spinner {
+                position: relative;
+                z-index: 1;
+                display: none;
+                grid-area: 1 / 1;
+            }
+
+            .dock__state-icon {
+                width: 17px;
+                height: 17px;
+            }
+
+            .dock__spinner {
+                width: 16px;
+                height: 16px;
+                border: 1.5px solid color-mix(in srgb, var(--state-color) 24%, transparent);
+                border-top-color: var(--state-color);
+                border-radius: 50%;
+                animation: spin 850ms linear infinite;
+            }
+
+            .dock__copy {
+                position: relative;
+                z-index: 1;
+                display: grid;
+                min-width: 0;
+                gap: 1px;
+                text-align: left;
+            }
+
+            .dock__copy strong,
+            .dock__copy small {
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .dock__copy strong {
+                color: var(--state-color);
+                font-size: 12.5px;
+                font-weight: 760;
+                line-height: 1.15;
+                letter-spacing: 0.01em;
+            }
+
+            .dock__copy small {
+                color: var(--muted);
+                font-size: 9.5px;
+                font-weight: 560;
+                line-height: 1.2;
             }
 
             .shell[data-minimized="true"] .panel {
@@ -1129,7 +1229,7 @@
             }
 
             .shell[data-minimized="true"] {
-                width: 46px;
+                width: 116px;
             }
 
             .shell[data-minimized="true"] .dock {
@@ -1137,32 +1237,39 @@
                 animation: panel-in 160ms ease-out both;
             }
 
-            .shell[data-state="running"] .state-dot,
-            .shell[data-state="loading"] .state-dot,
-            .shell[data-state="waiting"] .state-dot,
-            .shell[data-state="queue"] .state-dot,
-            .shell[data-state="cooldown"] .state-dot,
-            .shell[data-state="running"] .dock__status,
-            .shell[data-state="loading"] .dock__status,
-            .shell[data-state="waiting"] .dock__status,
-            .shell[data-state="queue"] .dock__status,
-            .shell[data-state="cooldown"] .dock__status {
-                background: var(--terracotta);
+            .shell[data-state="running"],
+            .shell[data-state="queue"] {
+                --state-color: var(--forest);
             }
 
-            .shell[data-state="paused"] .state-dot,
-            .shell[data-state="paused"] .dock__status {
-                background: var(--faint);
-                box-shadow: 0 0 0 3px var(--surface);
+            .shell[data-state="loading"],
+            .shell[data-state="waiting"],
+            .shell[data-state="cooldown"],
+            .shell[data-state="paused"] {
+                --state-color: var(--warning);
             }
 
-            .shell[data-state="done"] .state-dot,
-            .shell[data-state="done"] .dock__status {
-                background: var(--forest);
+            .shell[data-state="done"] {
+                --state-color: var(--success);
+            }
+
+            .shell[data-state="idle"] [data-dock-icon="idle"],
+            .shell[data-state="running"] [data-dock-icon="running"],
+            .shell[data-state="queue"] [data-dock-icon="queue"],
+            .shell[data-state="paused"] [data-dock-icon="paused"],
+            .shell[data-state="done"] [data-dock-icon="done"],
+            .shell[data-state="loading"] [data-dock-icon="busy"],
+            .shell[data-state="waiting"] [data-dock-icon="busy"],
+            .shell[data-state="cooldown"] [data-dock-icon="busy"] {
+                display: block;
             }
 
             .shell[data-state="running"] .state-dot {
                 animation: breathe 1.8s ease-in-out infinite;
+            }
+
+            .shell[data-state="running"] .dock__glyph {
+                animation: dock-pulse 2.2s ease-in-out infinite;
             }
 
             :host([data-dragging="true"]) .panel,
@@ -1187,6 +1294,15 @@
             @keyframes breathe {
                 0%, 100% { opacity: 0.72; }
                 50% { opacity: 1; }
+            }
+
+            @keyframes dock-pulse {
+                0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--state-color) 0%, transparent); }
+                50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--state-color) 10%, transparent); }
+            }
+
+            @keyframes spin {
+                to { transform: rotate(1turn); }
             }
 
             @media (max-width: 390px) {
@@ -1300,7 +1416,7 @@
                                 type="range"
                                 min="${CONFIG.minSpeed}"
                                 max="${CONFIG.maxSpeed}"
-                                step="${CONFIG.speedStep}"
+                                step="${CONFIG.speedSliderStep}"
                                 value="${settings.speed}"
                                 aria-label="平均阅读速度"
                             >
@@ -1415,9 +1531,19 @@
                 </div>
             </section>
 
-            <button class="dock" type="button" data-action="expand" data-drag-handle aria-label="展开 AutoReadingForLD 阅读控制台" title="展开阅读控制台">
-                ${renderIcon('bookOpenText', 'icon dock__icon')}
-                <span class="dock__status" aria-hidden="true"></span>
+            <button class="dock" type="button" data-action="expand" data-drag-handle aria-label="准备就绪，展开阅读控制台" title="准备就绪 · 点击展开">
+                <span class="dock__glyph" aria-hidden="true">
+                    ${renderIcon('play', 'icon dock__state-icon', 'data-dock-icon="idle"')}
+                    ${renderIcon('waveSine', 'icon dock__state-icon', 'data-dock-icon="running"')}
+                    ${renderIcon('bookOpenText', 'icon dock__state-icon', 'data-dock-icon="queue"')}
+                    ${renderIcon('pause', 'icon dock__state-icon', 'data-dock-icon="paused"')}
+                    ${renderIcon('checkCircle', 'icon dock__state-icon', 'data-dock-icon="done"')}
+                    <span class="dock__spinner" data-dock-icon="busy"></span>
+                </span>
+                <span class="dock__copy">
+                    <strong data-role="dock-state-label">待机</strong>
+                    <small data-role="dock-state-detail">点击展开</small>
+                </span>
             </button>
         </div>
     `;
@@ -1446,18 +1572,163 @@
         progressValue: shadow.querySelector('[data-role="progress-value"]'),
         timeValue: shadow.querySelector('[data-role="time-value"]'),
         distanceValue: shadow.querySelector('[data-role="distance-value"]'),
+        dockStateLabel: shadow.querySelector('[data-role="dock-state-label"]'),
+        dockStateDetail: shadow.querySelector('[data-role="dock-state-detail"]'),
         presetButtons: [...shadow.querySelectorAll('[data-speed]')]
     };
 
+    const themeColorProbe = document.createElement('span');
+    themeColorProbe.setAttribute('aria-hidden', 'true');
+    themeColorProbe.style.cssText = 'position:fixed;width:0;height:0;overflow:hidden;opacity:0;pointer-events:none;';
+    shadow.appendChild(themeColorProbe);
+    const themeColorCanvas = document.createElement('canvas');
+    themeColorCanvas.width = 1;
+    themeColorCanvas.height = 1;
+    const themeColorContext = themeColorCanvas.getContext('2d', { willReadFrequently: true });
+
+    function resolveCssColor(value) {
+        const candidate = String(value || '').trim();
+        if (!candidate) {
+            return null;
+        }
+
+        themeColorProbe.style.color = '';
+        themeColorProbe.style.color = candidate;
+        if (!themeColorProbe.style.color) {
+            return null;
+        }
+
+        const resolved = getComputedStyle(themeColorProbe).color;
+        let [red, green, blue, alpha = 1] = resolved.match(/[\d.]+/g)?.map(Number) || [];
+
+        // Canvas 将 color(srgb)、display-p3、lab 等现代色彩语法统一转换成可比较的 RGBA。
+        if (themeColorContext) {
+            themeColorContext.clearRect(0, 0, 1, 1);
+            themeColorContext.fillStyle = resolved;
+            themeColorContext.fillRect(0, 0, 1, 1);
+            const pixel = themeColorContext.getImageData(0, 0, 1, 1).data;
+            [red, green, blue, alpha] = [pixel[0], pixel[1], pixel[2], pixel[3] / 255];
+        }
+
+        if (![red, green, blue, alpha].every(Number.isFinite)) {
+            return null;
+        }
+
+        return {
+            css: resolved,
+            alpha,
+            luminance: (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
+        };
+    }
+
+    function readPageColorToken(...tokens) {
+        const styles = [getComputedStyle(document.body), getComputedStyle(document.documentElement)];
+        for (const token of tokens) {
+            for (const style of styles) {
+                const color = resolveCssColor(style.getPropertyValue(token));
+                if (color && color.alpha > 0.05) {
+                    return color;
+                }
+            }
+        }
+        return null;
+    }
+
+    function readVisiblePageBackground() {
+        const candidates = [
+            document.querySelector('#main-outlet'),
+            document.querySelector('.background-container'),
+            document.body,
+            document.documentElement
+        ];
+
+        for (const element of candidates) {
+            if (!element) {
+                continue;
+            }
+
+            const color = resolveCssColor(getComputedStyle(element).backgroundColor);
+            // transparent 在浏览器中通常会计算为 rgba(0, 0, 0, 0)，不能据此判为暗色。
+            if (color && color.alpha > 0.05) {
+                return color;
+            }
+        }
+
+        return null;
+    }
+
     function syncTheme() {
-        const background = getComputedStyle(document.body).backgroundColor;
-        const channels = background.match(/[\d.]+/g)?.slice(0, 3).map(Number) || [];
-        const [red = 255, green = 255, blue = 255] = channels;
-        const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
-        const classSuggestsDark = document.documentElement.classList.contains('dark')
-            || document.body.classList.contains('dark')
-            || document.documentElement.dataset.colorScheme === 'dark';
-        host.dataset.theme = classSuggestsDark || luminance < 0.46 ? 'dark' : 'light';
+        // 优先使用 Discourse 主题令牌；站点自定义主题也能同步背景、文字、边线与强调色。
+        const background = readPageColorToken('--secondary', '--d-content-background', '--surface', '--page')
+            || readVisiblePageBackground();
+        const foreground = readPageColorToken('--primary', '--primary-very-high', '--ink')
+            || resolveCssColor(getComputedStyle(document.body).color);
+        const muted = readPageColorToken('--primary-medium', '--primary-high', '--muted');
+        const line = readPageColorToken('--primary-low', '--primary-low-mid', '--line');
+        const accent = readPageColorToken('--tertiary', '--d-link-color', '--accent');
+
+        const themeHints = [
+            document.documentElement.className,
+            document.body.className,
+            document.documentElement.dataset.colorScheme,
+            document.documentElement.dataset.theme,
+            document.body.dataset.colorScheme,
+            document.body.dataset.theme,
+            getComputedStyle(document.documentElement).colorScheme
+        ].filter(Boolean).join(' ').toLowerCase();
+        const explicitlyDark = /(?:^|[\s_-])dark(?:$|[\s_-])/.test(themeHints);
+        const explicitlyLight = /(?:^|[\s_-])light(?:$|[\s_-])/.test(themeHints);
+        const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches || false;
+        const dark = background
+            ? background.luminance < 0.48
+            : explicitlyDark || (!explicitlyLight && prefersDark);
+
+        host.dataset.theme = dark ? 'dark' : 'light';
+
+        const applyThemeColor = (property, color) => {
+            if (color) {
+                host.style.setProperty(property, color.css);
+            } else {
+                host.style.removeProperty(property);
+            }
+        };
+
+        applyThemeColor('--page-surface', background);
+        applyThemeColor('--page-ink', foreground);
+        applyThemeColor('--page-muted', muted);
+        applyThemeColor('--page-line', line);
+        applyThemeColor('--page-accent', accent);
+    }
+
+    function dockDetailForState(state) {
+        switch (state) {
+            case 'running':
+                return `${Math.round(settings.speed)} 像素/秒`;
+            case 'loading':
+                return '衔接新楼层';
+            case 'waiting':
+                return '确认帖子末尾';
+            case 'queue':
+                return `${settings.queueLimit} 篇队列`;
+            case 'cooldown':
+                return '即将下一篇';
+            case 'paused':
+                return '位置已保留';
+            case 'done':
+                return '已读到末尾';
+            default:
+                return '点击展开';
+        }
+    }
+
+    function renderDockState(state = refs.shell.dataset.state || 'idle') {
+        const copy = STATE_COPY[state] || STATE_COPY.idle;
+        const detail = dockDetailForState(state);
+        refs.dockStateLabel.textContent = copy.chip;
+        refs.dockStateDetail.textContent = detail;
+        refs.dock.title = `${copy.title} · 点击展开`;
+        const accessibleDetail = state === 'idle' ? '' : `，${detail}`;
+        refs.dock.setAttribute('aria-label', `${copy.title}${accessibleDetail}，点击展开阅读控制台`);
     }
 
     function getShellLayoutRect() {
@@ -1530,6 +1801,7 @@
         refs.presetButtons.forEach((button) => {
             button.setAttribute('aria-pressed', String(Number(button.dataset.speed) === nextSpeed));
         });
+        renderDockState();
 
         if (persist) {
             StorageManager.save(settings);
@@ -1562,6 +1834,7 @@
         refs.queueLimit.value = String(nextLimit);
         refs.queueCount.textContent = `${nextLimit} 篇`;
         refs.queueSummaryCount.textContent = String(nextLimit);
+        renderDockState();
 
         if (persist) {
             StorageManager.save(settings);
@@ -1769,6 +2042,7 @@
         let speedMultiplier = 1;
         let nextSpeedVariationAt = 0;
         let distance = 0;
+        let scrollRemainder = 0;
         let elapsedBeforeRun = 0;
         let activeSince = 0;
         let lastUiRefreshAt = 0;
@@ -1813,7 +2087,7 @@
                 'aria-label',
                 queueActionActive ? '停止连续阅读' : running ? '暂停自动阅读' : '开始自动阅读'
             );
-            refs.dock.title = `${copy.title} · 点击展开`;
+            renderDockState(state);
         }
 
         function renderStats(force = false, timestamp = performance.now()) {
@@ -1840,6 +2114,7 @@
             running = false;
             activeSince = 0;
             currentSpeed = 0;
+            scrollRemainder = 0;
             bottomReachedAt = 0;
 
             if (frameId !== null) {
@@ -1890,8 +2165,16 @@
                     setState('running');
                 }
 
-                window.scrollBy(0, currentSpeed * deltaSeconds);
+                // 低速或高刷新率下，单帧位移可能不足 1px；浏览器逐帧取整会导致页面完全不动。
+                // 先累计小数像素，只提交整数部分，保证 px/s 在不同刷新率下都能真实生效。
+                scrollRemainder += currentSpeed * deltaSeconds;
+                const scrollPixels = Math.trunc(scrollRemainder);
+                if (scrollPixels !== 0) {
+                    window.scrollBy(0, scrollPixels);
+                    scrollRemainder -= scrollPixels;
+                }
             } else {
+                scrollRemainder = 0;
                 if (!bottomReachedAt) {
                     bottomReachedAt = timestamp;
                 }
@@ -1925,6 +2208,7 @@
             lastHeight = getScrollMetrics().height;
             bottomReachedAt = 0;
             currentSpeed = Math.min(settings.speed, Math.max(8, settings.speed * 0.35));
+            scrollRemainder = 0;
             speedMultiplier = 1;
             nextSpeedVariationAt = activeSince + CONFIG.speedVariationIntervalMinMs;
             setState('running');
@@ -2600,9 +2884,35 @@
     routeObserver.observe(document.body, { childList: true, subtree: true });
     window.addEventListener('popstate', () => window.setTimeout(handleLocationChange, 0));
 
-    const themeObserver = new MutationObserver(syncTheme);
-    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-color-scheme'] });
-    themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'style'] });
+    let themeSyncFrame = null;
+    function scheduleThemeSync() {
+        if (themeSyncFrame !== null) {
+            return;
+        }
+
+        themeSyncFrame = requestAnimationFrame(() => {
+            themeSyncFrame = null;
+            syncTheme();
+        });
+    }
+
+    const themeObserver = new MutationObserver(scheduleThemeSync);
+    const themeAttributeFilter = ['class', 'style', 'data-color-scheme', 'data-theme', 'data-theme-id'];
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: themeAttributeFilter });
+    themeObserver.observe(document.body, { attributes: true, attributeFilter: themeAttributeFilter });
+
+    // Discourse 切换主题时可能替换主题样式表而不修改 body 类名，因此同时观察 head。
+    const themeStylesheetObserver = new MutationObserver(scheduleThemeSync);
+    themeStylesheetObserver.observe(document.head, {
+        attributes: true,
+        attributeFilter: ['href', 'media', 'disabled'],
+        childList: true,
+        subtree: true
+    });
+
+    const preferredColorScheme = window.matchMedia?.('(prefers-color-scheme: dark)');
+    preferredColorScheme?.addEventListener?.('change', scheduleThemeSync);
+    window.addEventListener('pageshow', scheduleThemeSync);
 
     setSpeed(settings.speed, false);
     setQueueLimit(settings.queueLimit, false);
