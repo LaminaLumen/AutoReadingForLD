@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import process from 'node:process';
 
-const scriptUrl = new URL('../AutoReadingForLD.user.js', import.meta.url);
+const scriptUrl = new URL('../Lanyue.user.js', import.meta.url);
 const packageUrl = new URL('../package.json', import.meta.url);
 const [source, packageText] = await Promise.all([
     readFile(scriptUrl, 'utf8'),
@@ -30,7 +30,7 @@ function metadataValue(key) {
 
 requireMatch(/^\/\/ ==UserScript==$/m, '缺少用户脚本元数据起始标记');
 requireMatch(/^\/\/ ==\/UserScript==$/m, '缺少用户脚本元数据结束标记');
-requireMatch(/^\/\/\s+@name\s+AutoReadingForLD$/m, '@name 与项目名称不一致');
+requireMatch(/^\/\/\s+@name\s+澜阅$/m, '@name 与项目名称不一致');
 requireMatch(/^\/\/\s+@match\s+https:\/\/linux\.do\/t\/\*$/m, '缺少 /t/ 帖子匹配规则');
 requireMatch(/^\/\/\s+@match\s+https:\/\/linux\.do\/n\/\*$/m, '缺少 /n/ 帖子匹配规则');
 requireMatch(/^\/\/\s+@match\s+https:\/\/linux\.do\/new\*$/m, '缺少 /new 列表匹配规则');
@@ -39,8 +39,8 @@ requireMatch(/^\/\/\s+@match\s+https:\/\/linux\.do\/unseen\*$/m, '缺少 /unseen
 requireMatch(/^\/\/\s+@match\s+https:\/\/linux\.do\/latest\*$/m, '缺少 /latest 列表匹配规则');
 requireMatch(/^\/\/\s+@grant\s+none$/m, '脚本必须保持 @grant none');
 requireMatch(/^\/\/\s+@license\s+MIT$/m, '缺少 MIT 许可元数据');
-requireMatch(/^\/\/\s+@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/LaminaLumen\/AutoReadingForLD\/main\/AutoReadingForLD\.user\.js$/m, '下载地址不正确');
-requireMatch(/^\/\/\s+@updateURL\s+https:\/\/raw\.githubusercontent\.com\/LaminaLumen\/AutoReadingForLD\/main\/AutoReadingForLD\.user\.js$/m, '更新地址不正确');
+requireMatch(/^\/\/\s+@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/LaminaLumen\/Lanyue\/main\/Lanyue\.user\.js$/m, '下载地址不正确');
+requireMatch(/^\/\/\s+@updateURL\s+https:\/\/raw\.githubusercontent\.com\/LaminaLumen\/Lanyue\/main\/Lanyue\.user\.js$/m, '更新地址不正确');
 
 const metadataVersion = metadataValue('version');
 const runtimeVersion = source.match(/version:\s*'([^']+)'/)?.[1] || '';
@@ -56,9 +56,9 @@ rejectMatch(/\b(?:eval|Function)\s*\(/, '禁止动态执行代码');
 rejectMatch(/localStorage\.clear\s*\(/, '禁止清空整个站点的 localStorage');
 
 if (failures.length > 0) {
-    console.error('AutoReadingForLD 检查失败：');
+    console.error('澜阅检查失败：');
     failures.forEach((failure) => console.error(`- ${failure}`));
     process.exitCode = 1;
 } else {
-    console.log(`AutoReadingForLD v${metadataVersion} 检查通过。`);
+    console.log(`澜阅 v${metadataVersion} 检查通过。`);
 }

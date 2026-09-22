@@ -1,6 +1,6 @@
 # 参与贡献
 
-感谢关注 AutoReadingForLD。提交变更前，请遵循以下约定。
+感谢关注澜阅。提交变更前，请遵循以下约定。
 
 ## 项目边界
 
@@ -24,7 +24,7 @@
 ## 开发流程
 
 1. 从 `main` 创建语义清晰的分支。
-2. 修改 `AutoReadingForLD.user.js` 及相关文档。
+2. 修改 `Lanyue.user.js` 及相关文档。
 3. 版本变化时同步更新元数据、`package.json` 和 `CHANGELOG.md`。
 4. 运行 `npm run check`。
 5. 在亮色、暗色、长帖、列表、三种阅读模式及窄屏环境中进行人工验证。

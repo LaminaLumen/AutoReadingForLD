@@ -1,6 +1,6 @@
 # 第三方来源说明
 
-AutoReadingForLD 2.0.0 基于以下项目的思路与早期实现进行重构：
+澜阅基于以下项目的思路与早期实现进行重构：
 
 - 项目：`Antman2023/linux.do-autoscroll`
 - 原脚本：`linux-do-autoscroll.user.js`

@@ -1,12 +1,12 @@
 {
-  "name": "auto-reading-for-ld",
-  "version": "2.0.2",
+  "name": "lanyue",
+  "version": "2.1.0",
   "private": true,
-  "description": "面向 LINUX DO 长帖的多模式自动阅读用户脚本",
+  "description": "澜阅：面向 LINUX DO 长帖的沉浸阅读器",
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "check": "node --check AutoReadingForLD.user.js && node scripts/check-userscript.mjs",
+    "check": "node --check Lanyue.user.js && node scripts/check-userscript.mjs",
     "preview": "node scripts/preview-server.mjs"
   },
   "engines": {

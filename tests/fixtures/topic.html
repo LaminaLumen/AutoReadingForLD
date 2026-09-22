@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>AutoReadingForLD 视觉验证</title>
+    <title>澜阅视觉验证</title>
     <style>
         :root {
             color-scheme: light;
@@ -55,7 +55,7 @@
             margin: 34px auto 120px;
         }
 
-        article, .topic-list {
+        .topic-shell, .topic-list {
             padding: clamp(24px, 5vw, 52px);
             border: 1px solid var(--line);
             border-radius: 16px;
@@ -78,12 +78,20 @@
         .topic-list-item a { color: var(--ink); font-size: 17px; font-weight: 700; text-decoration: none; }
         .topic-list-item small { color: var(--muted); }
         .new-topic { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--accent); }
+
+        .topic-post {
+            padding: 28px 0 20px;
+            border-top: 1px solid var(--line);
+        }
+
+        .topic-post:first-child { border-top: 0; }
+        .post-number { margin-bottom: 14px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; }
     </style>
 </head>
 <body>
     <header>
         <strong>LINUX DO</strong>
-        <span>AutoReadingForLD 本地视觉验证页</span>
+        <span>澜阅本地视觉验证页</span>
     </header>
     <main id="main"></main>
     <script>
@@ -93,6 +101,7 @@
         }
 
         const main = document.getElementById('main');
+        const topicPostCounts = [6, 18, 42, 80, 120, 10, 25, 60, 150, 35, 95, 12];
         const listRoute = /^\/(new|unread|unseen|latest)/.test(location.pathname);
         if (listRoute) {
             main.innerHTML = `
@@ -104,24 +113,55 @@
                             <a class="title raw-topic-link" href="/t/topic/${1001 + index}">
                                 <span class="new-topic"></span>测试长帖 ${index + 1}：阅读节奏与排版
                             </a>
-                            <small>${18 + index * 3} 条回复 · 刚刚更新</small>
+                            <small>${topicPostCounts[index] - 1} 条回复 · 刚刚更新</small>
                         </div>
                     `).join('')}
                 </section>
             `;
         } else {
             const topicId = location.pathname.match(/(\d+)/)?.[1] || '1001';
+            const topicIndex = Math.max(0, Number(topicId) - 1001);
+            const lazyScenario = topicId === '1099';
+            const plannedPostCount = lazyScenario
+                ? 6
+                : topicPostCounts[topicIndex % topicPostCounts.length];
+            const finalPostCount = lazyScenario ? 42 : plannedPostCount;
+
+            const renderPosts = (start, end) => Array.from({ length: end - start + 1 }, (_, offset) => {
+                const postNumber = start + offset;
+                return `
+                    <section class="topic-post" data-post-id="${postNumber}" data-post-number="${postNumber}">
+                        <div class="post-number">第 ${postNumber} 层</div>
+                        ${Array.from({ length: 3 }, (_, paragraphIndex) => `
+                            <p>这是第 ${postNumber} 层的第 ${paragraphIndex + 1} 段验证内容。连续阅读需要根据楼层规模安排足够的停留时间，同时保持稳定、自然的滚动节奏，并在正文继续加载时及时延长本篇计划。</p>
+                        `).join('')}
+                    </section>
+                `;
+            }).join('');
+
             main.innerHTML = `
-                <article class="topic-post" data-post-id="1">
+                <div class="topic-progress" hidden>
+                    <span class="nums"><span>1</span> / <span class="total">${plannedPostCount}</span></span>
+                </div>
+                <article class="topic-shell">
                     <h1>测试长帖 ${topicId}：让阅读保持自己的节奏</h1>
-                    <div class="meta">视觉与滚动行为验证 · 共 42 个段落</div>
-                    ${Array.from({ length: 42 }, (_, index) => `
-                        <p>这是用于本地验证的第 ${index + 1} 段内容。长帖阅读不应该被突兀的控件打断，稳定的滚动节奏、明确的状态反馈和克制的视觉层级，能够让注意力重新回到正文。</p>
-                    `).join('')}
+                    <div class="meta">视觉与连续阅读行为验证 · 共 <span data-fixture-post-count>${plannedPostCount}</span> 层</div>
+                    <div data-post-stream>${renderPosts(1, plannedPostCount)}</div>
                 </article>
             `;
+
+            if (lazyScenario) {
+                window.setTimeout(() => {
+                    document.querySelector('.topic-progress .total').textContent = String(finalPostCount);
+                    document.querySelector('[data-fixture-post-count]').textContent = String(finalPostCount);
+                    document.querySelector('[data-post-stream]').insertAdjacentHTML(
+                        'beforeend',
+                        renderPosts(plannedPostCount + 1, finalPostCount)
+                    );
+                }, 8000);
+            }
         }
     </script>
-    <script src="/AutoReadingForLD.user.js"></script>
+    <script src="/Lanyue.user.js"></script>
 </body>
 </html>

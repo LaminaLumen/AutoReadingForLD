@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         AutoReadingForLD
-// @name:zh-CN   AutoReadingForLD - LINUX DO 沉浸阅读助手
-// @namespace    https://github.com/LaminaLumen/AutoReadingForLD
-// @version      2.0.2
-// @description  为 LINUX DO 长帖提供自然节奏滚动、三种阅读模式、懒加载等待与沉浸式控制面板。
-// @author       pboy, LaminaLumen contributors
+// @name         澜阅
+// @name:zh-CN   澜阅 - LINUX DO 沉浸阅读器
+// @namespace    https://github.com/LaminaLumen/Lanyue
+// @version      2.1.0
+// @description  让 LINUX DO 长帖按自然节奏缓缓展开，支持当前帖、自动帖与连续阅读。
+// @author       pboy, 澜阅 contributors
 // @license      MIT
 // @match        https://linux.do/t/*
 // @match        https://linux.do/n/*
@@ -15,28 +15,27 @@
 // @icon         https://linux.do/favicon.ico
 // @grant        none
 // @run-at       document-idle
-// @downloadURL  https://raw.githubusercontent.com/LaminaLumen/AutoReadingForLD/main/AutoReadingForLD.user.js
-// @updateURL    https://raw.githubusercontent.com/LaminaLumen/AutoReadingForLD/main/AutoReadingForLD.user.js
-// @homepageURL  https://github.com/LaminaLumen/AutoReadingForLD
-// @supportURL   https://github.com/LaminaLumen/AutoReadingForLD/issues
+// @downloadURL  https://raw.githubusercontent.com/LaminaLumen/Lanyue/main/Lanyue.user.js
+// @updateURL    https://raw.githubusercontent.com/LaminaLumen/Lanyue/main/Lanyue.user.js
+// @homepageURL  https://github.com/LaminaLumen/Lanyue
+// @supportURL   https://github.com/LaminaLumen/Lanyue/issues
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     const APP = Object.freeze({
-        name: 'AutoReadingForLD',
-        version: '2.0.2',
-        rootId: 'auto-reading-for-ld-root',
-        storageKey: 'auto-reading-for-ld:settings:v2',
-        queueStorageKey: 'auto-reading-for-ld:queue:v1',
-        legacyStorageKey: 'linuxdo-autoscroll-settings'
+        name: '澜阅',
+        version: '2.1.0',
+        rootId: 'lanyue-reader-root',
+        storageKey: 'lanyue:settings:v1',
+        queueStorageKey: 'lanyue:queue:v1'
     });
 
     const CONFIG = Object.freeze({
         // 原版最低档为 0.5 px/frame，按常见的 60Hz 刷新率折算约为 30 px/s。
         defaultSpeed: 30,
-        settingsRevision: 2,
+        settingsRevision: 1,
         minSpeed: 12,
         maxSpeed: 160,
         speedSliderStep: 2,
@@ -52,6 +51,11 @@
         queueMaxItems: 20,
         queueDefaultItems: 8,
         queueMaxAgeMs: 6 * 60 * 60 * 1000,
+        queueReadBaseMs: 15000,
+        queueReadPerPostMs: 3200,
+        queueReadMinMs: 30000,
+        queueReadMaxMs: 10 * 60 * 1000,
+        queuePlanRefreshMs: 1000,
         manualPauseGraceMs: 900,
         uiRefreshMs: 120,
         edgePadding: 12,
@@ -71,14 +75,14 @@
     ]);
 
     const STATE_COPY = Object.freeze({
-        idle: { chip: '待机', title: '准备就绪', detail: '按 Alt + S 开始阅读' },
-        running: { chip: '阅读中', title: '正在平稳下行', detail: '再次点击即可暂停' },
-        loading: { chip: '载入', title: '发现后续内容', detail: '正在衔接新楼层' },
-        waiting: { chip: '等待', title: '等待后续楼层', detail: '确认是否已到帖子底部' },
+        idle: { chip: '就绪', title: '准备阅读', detail: '选择模式，开始后自动向下滚动' },
+        running: { chip: '阅读中', title: '正在向下阅读', detail: '再次点击即可暂停' },
+        loading: { chip: '载入', title: '正在衔接后续楼层', detail: '内容就绪后继续阅读' },
+        waiting: { chip: '确认底部', title: '等待后续内容', detail: '稍后确认是否已到末尾' },
         queue: { chip: '队列', title: '连续阅读已就绪', detail: '将在当前标签页逐篇阅读' },
-        cooldown: { chip: '冷却', title: '本帖阅读完成', detail: '稍后进入下一篇' },
-        paused: { chip: '暂停', title: '阅读已暂停', detail: '保留当前位置和本次统计' },
-        done: { chip: '完成', title: '已经读到末尾', detail: '可返回顶部后再次开始' }
+        cooldown: { chip: '间隔', title: '这一篇已读完', detail: '稍后进入下一篇' },
+        paused: { chip: '已暂停', title: '停在当前位置', detail: '进度与本次统计已保留' },
+        done: { chip: '已完成', title: '已读到末尾', detail: '返回顶部后可以再次开始' }
     });
 
     if (document.getElementById(APP.rootId)) {
@@ -119,6 +123,151 @@
         const viewport = Math.max(window.innerHeight, 1);
         const screens = distance / viewport;
         return screens < 10 ? `${screens.toFixed(1)} 屏` : `${Math.round(screens)} 屏`;
+    }
+
+    function formatReadingDuration(milliseconds, roundUpToMinute = false) {
+        const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+        if (roundUpToMinute || totalSeconds >= 60) {
+            const minutes = Math.max(1, Math.floor(totalSeconds / 60));
+            const seconds = totalSeconds % 60;
+            return seconds > 0 && !roundUpToMinute
+                ? `${minutes} 分 ${seconds} 秒`
+                : `${Math.ceil(totalSeconds / 60)} 分钟`;
+        }
+        return `${totalSeconds} 秒`;
+    }
+
+    function parseDisplayedCounts(value) {
+        const tokens = String(value || '').match(/\d+(?:[.,]\d+)?\s*(?:[kK万])?/g) || [];
+        return tokens
+            .map((token) => {
+                const suffix = token.match(/[kK万]/)?.[0] || '';
+                const numericText = token.replace(/[kK万\s]/g, '');
+                if (suffix) {
+                    const normalized = Number(numericText.replace(',', '.'));
+                    const multiplier = suffix === '万' ? 10000 : 1000;
+                    return Math.round(normalized * multiplier);
+                }
+
+                return Number(numericText.replace(/\D/g, ''));
+            })
+            .filter((count) => Number.isFinite(count) && count > 0);
+    }
+
+    function displayedCountFromElement(element) {
+        if (!(element instanceof Element)) {
+            return 0;
+        }
+
+        const values = [
+            element.textContent,
+            element.getAttribute('title'),
+            element.getAttribute('aria-label')
+        ].flatMap(parseDisplayedCounts);
+        return values.length > 0 ? Math.max(...values) : 0;
+    }
+
+    function preloadedTopicPostCount() {
+        const element = document.querySelector('#data-preloaded');
+        if (!element) {
+            return 0;
+        }
+
+        const sources = [
+            element.getAttribute('data-preloaded'),
+            element.textContent
+        ].filter((value, index, values) => value && values.indexOf(value) === index);
+        let maximum = 0;
+
+        for (const source of sources) {
+            // 预载数据可能包含整个话题；设置体积和遍历上限，避免异常页面拖慢滚动。
+            if (source.length > 5 * 1024 * 1024) {
+                continue;
+            }
+
+            let parsed;
+            try {
+                parsed = JSON.parse(source);
+            } catch {
+                continue;
+            }
+
+            const stack = [parsed];
+            const visited = new Set();
+            let inspected = 0;
+            while (stack.length > 0 && inspected < 2500) {
+                const current = stack.pop();
+                inspected += 1;
+
+                if (typeof current === 'string') {
+                    const trimmed = current.trim();
+                    if (trimmed.length <= 5 * 1024 * 1024 && /^(?:\{|\[)/.test(trimmed)) {
+                        try {
+                            stack.push(JSON.parse(trimmed));
+                        } catch {
+                            // 部分字段本来就是普通文本，不需要处理。
+                        }
+                    }
+                    continue;
+                }
+
+                if (!current || typeof current !== 'object' || visited.has(current)) {
+                    continue;
+                }
+                visited.add(current);
+
+                const stream = current.post_stream?.stream;
+                if (Array.isArray(stream)) {
+                    maximum = Math.max(maximum, stream.length);
+                }
+
+                Object.values(current).forEach((value) => stack.push(value));
+            }
+        }
+
+        return maximum;
+    }
+
+    function detectTopicPostCount() {
+        const candidates = [];
+        const pushElementCount = (element, offset = 0) => {
+            const count = displayedCountFromElement(element);
+            if (count > 0) {
+                candidates.push(count + offset);
+            }
+        };
+
+        document.querySelectorAll('.topic-progress .nums .total').forEach((element) => pushElementCount(element));
+        document.querySelectorAll('.topic-progress .nums').forEach((element) => pushElementCount(element));
+        document.querySelectorAll('.topic-timeline .timeline-replies .number, .topic-map .replies .number')
+            .forEach((element) => pushElementCount(element, 1));
+
+        document.querySelectorAll('.topic-post[data-post-number], [data-post-number]').forEach((element) => {
+            const postNumber = Number(element.getAttribute('data-post-number'));
+            if (Number.isFinite(postNumber) && postNumber > 0) {
+                candidates.push(Math.floor(postNumber));
+            }
+        });
+
+        const preloadedCount = preloadedTopicPostCount();
+        if (preloadedCount > 0) {
+            candidates.push(preloadedCount);
+        }
+
+        // 正文已经出现时至少按首帖规划，后续探测到更多楼层时只会上调计划。
+        return candidates.length > 0 ? Math.max(...candidates) : 1;
+    }
+
+    function createQueueReadingPlan() {
+        const postCount = detectTopicPostCount();
+        return {
+            postCount,
+            minimumMs: clamp(
+                CONFIG.queueReadBaseMs + postCount * CONFIG.queueReadPerPostMs,
+                CONFIG.queueReadMinMs,
+                CONFIG.queueReadMaxMs
+            )
+        };
     }
 
     function getScrollMetrics() {
@@ -190,69 +339,17 @@
             };
         },
 
-        migrateLegacy() {
-            try {
-                const legacyText = localStorage.getItem(APP.legacyStorageKey);
-                if (!legacyText) {
-                    return null;
-                }
-
-                const legacy = JSON.parse(legacyText);
-                const legacySpeed = Number(legacy.speed);
-
-                return this.normalize({
-                    // 旧版本按 px/frame 计速；迁移时换算为更温和的 px/s。
-                    speed: Number.isFinite(legacySpeed) ? legacySpeed * 12 : CONFIG.defaultSpeed,
-                    minimized: typeof legacy.isMinimized === 'boolean' ? legacy.isMinimized : true
-                });
-            } catch (error) {
-                console.warn(`[${APP.name}] 旧配置迁移失败，将使用默认设置。`, error);
-                return null;
-            }
-        },
-
         load() {
             try {
                 const savedText = localStorage.getItem(APP.storageKey);
                 if (savedText) {
                     const saved = JSON.parse(savedText);
-                    const savedRevision = Number.isInteger(saved?.settingsRevision)
-                        ? saved.settingsRevision
-                        : 0;
-                    const needsDefaultSpeedMigration = (
-                        savedRevision < 1
-                        && saved?.speed === 52
-                    );
-                    const usesOldProtectionDefaults = (
-                        savedRevision < 2
-                        && saved?.autoPauseOnHidden === true
-                        && saved?.pauseOnManualInput === true
-                    );
-                    const normalized = this.normalize({
-                        ...saved,
-                        speed: needsDefaultSpeedMigration ? CONFIG.defaultSpeed : saved?.speed,
-                        // 2.0.0/2.0.1 曾把两项保护同时默认开启，导致自动阅读频繁中断。
-                        // 仅迁移仍保持整组旧默认值的配置；用户单独调整过任一项时保留其选择。
-                        autoPauseOnHidden: usesOldProtectionDefaults ? false : saved?.autoPauseOnHidden,
-                        pauseOnManualInput: usesOldProtectionDefaults ? false : saved?.pauseOnManualInput
-                    });
-
-                    // 2.0.0 的 52 px/s 是旧默认值；仅迁移未标记的旧配置，用户之后手动选择 52 不受影响。
-                    if (
-                        needsDefaultSpeedMigration
-                        || usesOldProtectionDefaults
-                        || savedRevision !== CONFIG.settingsRevision
-                    ) {
+                    const normalized = this.normalize(saved);
+                    if (saved?.settingsRevision !== CONFIG.settingsRevision) {
                         this.save(normalized);
                     }
 
                     return normalized;
-                }
-
-                const migrated = this.migrateLegacy();
-                if (migrated) {
-                    this.save(migrated);
-                    return migrated;
                 }
             } catch (error) {
                 console.warn(`[${APP.name}] 设置读取失败，将使用默认设置。`, error);
@@ -408,8 +505,10 @@
                 max-height: min(536px, calc(100vh - 24px));
                 overflow: hidden;
                 border: 1px solid var(--line-strong);
-                border-radius: 14px;
-                background: var(--surface-raised);
+                border-radius: 16px;
+                background:
+                    linear-gradient(145deg, color-mix(in srgb, var(--page-accent) 4%, transparent), transparent 34%),
+                    var(--surface-raised);
                 box-shadow: var(--shadow);
                 transform-origin: var(--panel-origin-x, 100%) var(--panel-origin-y, 0%);
                 animation: panel-in 180ms ease-out both;
@@ -420,7 +519,9 @@
                 min-height: 412px;
                 flex-direction: column;
                 border-right: 1px solid var(--line);
-                background: var(--rail);
+                background:
+                    linear-gradient(180deg, color-mix(in srgb, var(--page-accent) 4%, transparent), transparent 30%),
+                    var(--rail);
             }
 
             .drag-strip {
@@ -489,16 +590,26 @@
 
             .mode-icon {
                 margin: 0 auto;
+                width: 30px;
+                height: 30px;
+                padding: 5px;
+                border: 1px solid transparent;
+                border-radius: 9px;
+                background: color-mix(in srgb, var(--surface-raised) 54%, transparent);
                 color: var(--faint);
-                font-size: 19px;
-                transition: color 140ms ease, transform 140ms ease;
+                font-size: 18px;
+                transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 140ms ease;
             }
 
             .mode-button:hover .mode-icon {
+                border-color: var(--line);
+                background: var(--surface-raised);
                 color: var(--forest);
             }
 
             .mode-button[aria-pressed="true"] .mode-icon {
+                border-color: color-mix(in srgb, var(--terracotta) 24%, var(--line));
+                background: color-mix(in srgb, var(--terracotta-soft) 72%, var(--surface-raised));
                 color: var(--terracotta);
                 transform: translateY(-1px);
             }
@@ -539,18 +650,57 @@
 
             .panel__header {
                 display: flex;
-                min-height: 56px;
+                min-height: 60px;
                 flex: 0 0 auto;
                 align-items: center;
                 justify-content: space-between;
                 gap: 10px;
-                padding: 9px 11px 8px 15px;
+                padding: 8px 11px 8px 13px;
                 border-bottom: 1px solid var(--line);
                 cursor: grab;
                 touch-action: none;
             }
 
             .brand {
+                display: flex;
+                min-width: 0;
+                align-items: center;
+                gap: 9px;
+            }
+
+            .brand__mark {
+                position: relative;
+                display: grid;
+                width: 32px;
+                height: 32px;
+                flex: 0 0 auto;
+                place-items: center;
+                overflow: hidden;
+                border: 1px solid color-mix(in srgb, var(--page-accent) 24%, var(--line));
+                border-radius: 10px;
+                background: color-mix(in srgb, var(--page-accent) 9%, var(--surface-raised));
+                color: var(--forest-deep);
+                box-shadow: inset 0 1px 0 color-mix(in srgb, var(--page-surface) 70%, transparent);
+            }
+
+            .brand__mark::after {
+                position: absolute;
+                right: -9px;
+                bottom: -10px;
+                width: 24px;
+                height: 24px;
+                border: 1px solid color-mix(in srgb, var(--page-accent) 14%, transparent);
+                border-radius: 50%;
+                content: "";
+            }
+
+            .brand__mark .icon {
+                position: relative;
+                z-index: 1;
+                font-size: 17px;
+            }
+
+            .brand__copy {
                 display: grid;
                 min-width: 0;
                 gap: 1px;
@@ -560,7 +710,7 @@
                 overflow: hidden;
                 color: var(--ink);
                 font-family: "Songti SC", STSong, "Noto Serif SC", "Source Han Serif SC", serif;
-                font-size: 17px;
+                font-size: 18px;
                 font-weight: 700;
                 line-height: 1.2;
                 text-overflow: ellipsis;
@@ -569,10 +719,9 @@
 
             .brand__meta {
                 color: var(--faint);
-                font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-                font-size: 9px;
-                font-weight: 650;
-                letter-spacing: 0.08em;
+                font-size: 9.5px;
+                font-weight: 620;
+                letter-spacing: 0.04em;
             }
 
             .minimize-button {
@@ -607,6 +756,7 @@
             }
 
             .hero {
+                position: relative;
                 display: grid;
                 gap: 6px;
             }
@@ -663,6 +813,7 @@
             }
 
             .main-control {
+                position: relative;
                 display: flex;
                 width: 100%;
                 min-height: 41px;
@@ -672,15 +823,31 @@
                 margin-top: 5px;
                 padding: 10px 14px;
                 border: 1px solid var(--action);
-                border-radius: 8px;
+                border-radius: 10px;
                 background: var(--action);
                 color: var(--page-surface);
-                box-shadow: 0 5px 12px color-mix(in srgb, var(--action) 24%, transparent);
+                box-shadow: 0 5px 12px color-mix(in srgb, var(--action) 18%, transparent);
                 font-size: 14.5px;
                 font-weight: 720;
                 letter-spacing: 0.02em;
+                overflow: hidden;
                 cursor: pointer;
                 transition: background 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+            }
+
+            .main-control::after {
+                position: absolute;
+                inset: 0;
+                background: linear-gradient(105deg, transparent 25%, color-mix(in srgb, var(--page-surface) 28%, transparent) 48%, transparent 72%);
+                content: "";
+                opacity: 0;
+                pointer-events: none;
+                transform: translateX(-105%);
+            }
+
+            .shell[data-state="running"] .main-control::after {
+                opacity: 0.42;
+                animation: reading-flow 3.2s ease-in-out infinite;
             }
 
             .control-icon {
@@ -689,7 +856,7 @@
 
             .main-control:hover {
                 background: var(--action-hover);
-                box-shadow: 0 6px 15px color-mix(in srgb, var(--action) 30%, transparent);
+                box-shadow: 0 6px 15px color-mix(in srgb, var(--action) 24%, transparent);
             }
 
             .main-control:active {
@@ -1120,41 +1287,69 @@
             .dock {
                 position: relative;
                 display: none;
-                grid-template-columns: 36px minmax(0, 1fr);
-                width: 116px;
-                height: 44px;
+                grid-template-columns: minmax(0, 1fr) 31px;
+                width: 148px;
+                height: 48px;
                 align-items: center;
-                gap: 8px;
-                padding: 3px 10px 3px 3px;
+                padding: 3px;
                 overflow: hidden;
-                border: 1px solid var(--line-strong);
+                border: 1px solid color-mix(in srgb, var(--line-strong) 86%, var(--state-color));
                 border-radius: 999px;
-                background: var(--surface-raised);
+                background: color-mix(in srgb, var(--surface-raised) 91%, transparent);
                 color: var(--ink);
-                box-shadow: var(--shadow);
-                cursor: grab;
+                box-shadow:
+                    0 14px 32px color-mix(in srgb, var(--page-ink) 15%, transparent),
+                    0 2px 8px color-mix(in srgb, var(--page-ink) 8%, transparent),
+                    inset 0 1px 0 color-mix(in srgb, var(--page-surface) 76%, transparent);
                 isolation: isolate;
                 touch-action: none;
-                transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+                backdrop-filter: blur(18px) saturate(1.12);
+                -webkit-backdrop-filter: blur(18px) saturate(1.12);
+                transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
             }
 
             .dock::before {
                 position: absolute;
-                z-index: -1;
+                z-index: 0;
                 inset: 0;
                 border-radius: inherit;
-                background: linear-gradient(
-                    120deg,
-                    color-mix(in srgb, var(--surface-raised) 92%, var(--page-accent)) 0%,
-                    var(--surface-raised) 38%,
-                    var(--surface-raised) 100%
-                );
+                background:
+                    radial-gradient(circle at 17% 0%, color-mix(in srgb, var(--state-color) 13%, transparent), transparent 42%),
+                    linear-gradient(112deg, color-mix(in srgb, var(--surface-raised) 82%, transparent), color-mix(in srgb, var(--surface-raised) 96%, transparent) 54%, color-mix(in srgb, var(--page-accent) 7%, var(--surface-raised)));
                 content: "";
+                pointer-events: none;
+            }
+
+            .dock::after {
+                position: absolute;
+                z-index: 4;
+                inset: 0;
+                border: 1px solid color-mix(in srgb, var(--page-surface) 54%, transparent);
+                border-radius: inherit;
+                box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--page-ink) 6%, transparent);
+                content: "";
+                pointer-events: none;
+            }
+
+            .dock__fluid {
+                position: absolute;
+                z-index: 1;
+                inset: 0;
+                width: 100%;
+                height: 100%;
+                opacity: 0.44;
+                pointer-events: none;
+                filter: saturate(1.12) contrast(1.04);
+                transform: translateZ(0);
+                transition: opacity 320ms ease, filter 320ms ease;
             }
 
             .dock:hover {
-                border-color: color-mix(in srgb, var(--state-color) 48%, var(--line-strong));
-                box-shadow: 0 16px 36px color-mix(in srgb, var(--page-ink) 18%, transparent), 0 3px 9px color-mix(in srgb, var(--page-ink) 8%, transparent);
+                border-color: color-mix(in srgb, var(--state-color) 52%, var(--line-strong));
+                box-shadow:
+                    0 18px 38px color-mix(in srgb, var(--page-ink) 18%, transparent),
+                    0 3px 10px color-mix(in srgb, var(--page-ink) 9%, transparent),
+                    inset 0 1px 0 color-mix(in srgb, var(--page-surface) 82%, transparent);
                 transform: translateY(-1px);
             }
 
@@ -1162,9 +1357,71 @@
                 transform: translateY(0);
             }
 
+            .dock__control,
+            .dock__expand {
+                position: relative;
+                z-index: 2;
+                min-width: 0;
+                border: 0;
+                background: transparent;
+                color: inherit;
+                cursor: pointer;
+            }
+
+            .dock__control {
+                display: grid;
+                grid-template-columns: 36px minmax(0, 1fr);
+                height: 40px;
+                align-items: center;
+                gap: 8px;
+                padding: 2px 5px 2px 1px;
+                border-radius: 999px 9px 9px 999px;
+                text-align: left;
+                touch-action: none;
+                transition: background 160ms ease;
+            }
+
+            .dock__control:hover {
+                background: linear-gradient(
+                    90deg,
+                    color-mix(in srgb, var(--state-color) 7%, transparent),
+                    color-mix(in srgb, var(--state-color) 4%, transparent) 62%,
+                    transparent 100%
+                );
+            }
+
+            .dock__control:active {
+                background: linear-gradient(
+                    90deg,
+                    color-mix(in srgb, var(--state-color) 11%, transparent),
+                    color-mix(in srgb, var(--state-color) 6%, transparent) 58%,
+                    transparent 100%
+                );
+            }
+
+            .dock__expand {
+                display: grid;
+                width: 31px;
+                height: 34px;
+                place-items: center;
+                border-left: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+                border-radius: 4px 999px 999px 4px;
+                color: var(--muted);
+                transition: color 160ms ease, background 160ms ease;
+            }
+
+            .dock__expand .icon {
+                width: 14px;
+                height: 14px;
+            }
+
+            .dock__expand:hover {
+                background: color-mix(in srgb, var(--state-color) 9%, transparent);
+                color: var(--state-color);
+            }
+
             .dock__glyph {
                 position: relative;
-                z-index: 1;
                 display: grid;
                 width: 36px;
                 height: 36px;
@@ -1172,9 +1429,11 @@
                 border-radius: 50%;
                 background: conic-gradient(
                     var(--state-color) 0 var(--progress, 0deg),
-                    var(--line) var(--progress, 0deg) 1turn
+                    color-mix(in srgb, var(--line) 82%, transparent) var(--progress, 0deg) 1turn
                 );
                 color: var(--state-color);
+                box-shadow: 0 2px 9px color-mix(in srgb, var(--page-ink) 7%, transparent);
+                transition: color 220ms ease, box-shadow 220ms ease;
             }
 
             .dock__glyph::before {
@@ -1182,8 +1441,11 @@
                 width: 30px;
                 height: 30px;
                 border-radius: 50%;
-                background: var(--surface-raised);
-                box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 76%, transparent);
+                background: color-mix(in srgb, var(--surface-raised) 90%, transparent);
+                box-shadow:
+                    inset 0 0 0 1px color-mix(in srgb, var(--line) 72%, transparent),
+                    inset 0 1px 0 color-mix(in srgb, var(--page-surface) 70%, transparent);
+                backdrop-filter: blur(6px);
                 content: "";
             }
 
@@ -1211,10 +1473,9 @@
 
             .dock__copy {
                 position: relative;
-                z-index: 1;
                 display: grid;
                 min-width: 0;
-                gap: 1px;
+                gap: 2px;
                 text-align: left;
             }
 
@@ -1227,15 +1488,15 @@
 
             .dock__copy strong {
                 color: var(--state-color);
-                font-size: 12.5px;
-                font-weight: 760;
+                font-size: 12px;
+                font-weight: 740;
                 line-height: 1.15;
                 letter-spacing: 0.01em;
             }
 
             .dock__copy small {
                 color: var(--muted);
-                font-size: 9.5px;
+                font-size: 9.25px;
                 font-weight: 560;
                 line-height: 1.2;
             }
@@ -1245,7 +1506,7 @@
             }
 
             .shell[data-minimized="true"] {
-                width: 116px;
+                width: 148px;
             }
 
             .shell[data-minimized="true"] .dock {
@@ -1288,9 +1549,51 @@
                 animation: dock-pulse 2.2s ease-in-out infinite;
             }
 
+            .shell[data-state="running"] .dock__fluid,
+            .shell[data-state="loading"] .dock__fluid,
+            .shell[data-state="waiting"] .dock__fluid,
+            .shell[data-state="queue"] .dock__fluid,
+            .shell[data-state="cooldown"] .dock__fluid {
+                opacity: 0.94;
+                filter: saturate(1.24) contrast(1.06);
+            }
+
+            .shell[data-state="paused"] .dock__fluid {
+                opacity: 0.28;
+            }
+
+            .shell[data-state="done"] .dock__fluid {
+                opacity: 0.58;
+            }
+
+            .shell[data-state="running"] .dock,
+            .shell[data-state="queue"] .dock {
+                border-color: color-mix(in srgb, var(--state-color) 42%, var(--line-strong));
+                box-shadow:
+                    0 16px 38px color-mix(in srgb, var(--page-ink) 17%, transparent),
+                    0 3px 10px color-mix(in srgb, var(--page-ink) 8%, transparent),
+                    0 0 20px color-mix(in srgb, var(--state-color) 9%, transparent),
+                    inset 0 1px 0 color-mix(in srgb, var(--page-surface) 82%, transparent);
+            }
+
+            :host([data-dock-fx="fallback"]) .shell[data-state="running"] .dock::before,
+            :host([data-dock-fx="fallback"]) .shell[data-state="loading"] .dock::before,
+            :host([data-dock-fx="fallback"]) .shell[data-state="waiting"] .dock::before {
+                background:
+                    radial-gradient(circle at 18% 18%, color-mix(in srgb, var(--state-color) 24%, transparent), transparent 35%),
+                    radial-gradient(circle at 72% 80%, color-mix(in srgb, var(--page-accent) 15%, transparent), transparent 44%),
+                    linear-gradient(112deg, color-mix(in srgb, var(--surface-raised) 78%, transparent), color-mix(in srgb, var(--state-color) 14%, var(--surface-raised)) 54%, var(--surface-raised));
+                background-size: 145% 145%, 165% 165%, 100% 100%;
+                animation: dock-fallback-flow 3.2s ease-in-out infinite alternate;
+            }
+
             :host([data-dragging="true"]) .panel,
             :host([data-dragging="true"]) .dock {
                 box-shadow: 0 24px 56px rgba(33, 43, 36, 0.22), 0 5px 14px rgba(33, 43, 36, 0.12);
+            }
+
+            :host([data-dragging="true"]) .dock__control {
+                cursor: grabbing;
             }
 
             @keyframes panel-in {
@@ -1315,6 +1618,16 @@
             @keyframes dock-pulse {
                 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--state-color) 0%, transparent); }
                 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--state-color) 10%, transparent); }
+            }
+
+            @keyframes dock-fallback-flow {
+                from { background-position: 0% 50%; }
+                to { background-position: 100% 50%; }
+            }
+
+            @keyframes reading-flow {
+                0%, 18% { transform: translateX(-105%); }
+                58%, 100% { transform: translateX(105%); }
             }
 
             @keyframes spin {
@@ -1362,7 +1675,7 @@
         </style>
 
         <div class="shell" data-state="idle" data-minimized="${settings.minimized}">
-            <section class="panel" aria-label="AutoReadingForLD 阅读控制台">
+            <section class="panel" aria-label="澜阅阅读控制台">
                 <aside class="mode-rail" aria-label="阅读模式">
                     <div class="drag-strip" data-drag-handle title="拖动控制台">
                         ${renderIcon('dotsSixVertical')}
@@ -1390,8 +1703,11 @@
                 <div class="panel__main">
                     <header class="panel__header" data-drag-handle>
                         <div class="brand">
-                            <span class="brand__name">自动阅读</span>
-                            <span class="brand__meta">LINUX DO · ${APP.version}</span>
+                            <span class="brand__mark" aria-hidden="true">${renderIcon('waveSine')}</span>
+                            <span class="brand__copy">
+                                <span class="brand__name">澜阅</span>
+                                <span class="brand__meta">LINUX DO · 长帖阅读器</span>
+                            </span>
                         </div>
                         <button class="minimize-button" type="button" data-action="minimize" aria-label="收起阅读控制台" title="收起（Alt + M）">
                             ${renderIcon('minus')}
@@ -1402,15 +1718,15 @@
                         <section class="hero" aria-labelledby="reading-state-title">
                             <div class="state-line" role="status" aria-live="polite">
                                 <span class="state-dot" aria-hidden="true"></span>
-                                <span data-role="state-chip">待机</span>
+                                <span data-role="state-chip">就绪</span>
                             </div>
-                            <strong class="hero__title" id="reading-state-title" data-role="state-title">准备就绪</strong>
-                            <span class="hero__detail" data-role="state-detail">按 Alt + S 开始阅读</span>
+                            <strong class="hero__title" id="reading-state-title" data-role="state-title">准备阅读</strong>
+                            <span class="hero__detail" data-role="state-detail">选择模式，开始后自动向下滚动</span>
                             <div class="queue-summary" data-role="queue-summary" hidden>
                                 <strong><span data-role="queue-summary-count">${settings.queueLimit}</span> 篇</strong>
                                 <span>· 每篇间隔 ${CONFIG.queueCooldownMs / 1000} 秒</span>
                             </div>
-                            <button class="main-control" type="button" data-action="toggle" aria-label="开始自动阅读">
+                            <button class="main-control" type="button" data-action="toggle" aria-label="开始阅读">
                                 ${renderIcon('play', 'icon control-icon', 'data-icon-state="play"')}
                                 ${renderIcon('pause', 'icon control-icon', 'data-icon-state="pause" hidden')}
                                 ${renderIcon('stop', 'icon control-icon', 'data-icon-state="stop" hidden')}
@@ -1538,7 +1854,7 @@
                     </main>
 
                     <footer class="panel__footer">
-                        <span class="footer-note">${renderIcon('waveSine')}自然变速范围 ±12%</span>
+                        <span class="footer-note" title="澜阅 ${APP.version}">${renderIcon('waveSine')}自然变速 ±12%</span>
                         <button class="reset-button" type="button" data-action="reset-position" title="恢复默认位置">
                             ${renderIcon('arrowCounterClockwise')}
                             <span>复位位置</span>
@@ -1547,20 +1863,26 @@
                 </div>
             </section>
 
-            <button class="dock" type="button" data-action="expand" data-drag-handle aria-label="准备就绪，展开阅读控制台" title="准备就绪 · 点击展开">
-                <span class="dock__glyph" aria-hidden="true">
-                    ${renderIcon('play', 'icon dock__state-icon', 'data-dock-icon="idle"')}
-                    ${renderIcon('waveSine', 'icon dock__state-icon', 'data-dock-icon="running"')}
-                    ${renderIcon('bookOpenText', 'icon dock__state-icon', 'data-dock-icon="queue"')}
-                    ${renderIcon('pause', 'icon dock__state-icon', 'data-dock-icon="paused"')}
-                    ${renderIcon('checkCircle', 'icon dock__state-icon', 'data-dock-icon="done"')}
-                    <span class="dock__spinner" data-dock-icon="busy"></span>
-                </span>
-                <span class="dock__copy">
-                    <strong data-role="dock-state-label">待机</strong>
-                    <small data-role="dock-state-detail">点击展开</small>
-                </span>
-            </button>
+            <div class="dock" role="group" aria-label="澜阅快捷控制">
+                <canvas class="dock__fluid" data-role="dock-fluid" aria-hidden="true"></canvas>
+                <button class="dock__control" type="button" data-action="dock-toggle" data-drag-handle aria-label="开始阅读" title="点按开始 · 拖动可移动">
+                    <span class="dock__glyph" aria-hidden="true">
+                        ${renderIcon('play', 'icon dock__state-icon', 'data-dock-icon="idle"')}
+                        ${renderIcon('waveSine', 'icon dock__state-icon', 'data-dock-icon="running"')}
+                        ${renderIcon('bookOpenText', 'icon dock__state-icon', 'data-dock-icon="queue"')}
+                        ${renderIcon('pause', 'icon dock__state-icon', 'data-dock-icon="paused"')}
+                        ${renderIcon('checkCircle', 'icon dock__state-icon', 'data-dock-icon="done"')}
+                        <span class="dock__spinner" data-dock-icon="busy"></span>
+                    </span>
+                    <span class="dock__copy">
+                        <strong data-role="dock-state-label">就绪</strong>
+                        <small data-role="dock-state-detail">点按开始</small>
+                    </span>
+                </button>
+                <button class="dock__expand" type="button" data-action="expand" aria-label="展开阅读设置" title="展开阅读设置">
+                    ${renderIcon('slidersHorizontal')}
+                </button>
+            </div>
         </div>
     `;
 
@@ -1570,6 +1892,9 @@
         shell: shadow.querySelector('.shell'),
         panel: shadow.querySelector('.panel'),
         dock: shadow.querySelector('.dock'),
+        dockControl: shadow.querySelector('.dock__control'),
+        dockExpand: shadow.querySelector('.dock__expand'),
+        dockFluid: shadow.querySelector('[data-role="dock-fluid"]'),
         toggleButton: shadow.querySelector('[data-action="toggle"]'),
         controlIcons: [...shadow.querySelectorAll('[data-icon-state]')],
         controlLabel: shadow.querySelector('[data-role="control-label"]'),
@@ -1632,6 +1957,9 @@
 
         return {
             css: resolved,
+            red,
+            green,
+            blue,
             alpha,
             luminance: (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
         };
@@ -1672,6 +2000,8 @@
 
         return null;
     }
+
+    let dockFluidEffect = null;
 
     function syncTheme() {
         // 优先使用 Discourse 主题令牌；站点自定义主题也能同步背景、文字、边线与强调色。
@@ -1714,37 +2044,474 @@
         applyThemeColor('--page-muted', muted);
         applyThemeColor('--page-line', line);
         applyThemeColor('--page-accent', accent);
+        dockFluidEffect?.syncTheme();
     }
+
+    function createDockFluidEffect() {
+        const canvas = refs.dockFluid;
+        const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+        const animatedStates = new Set(['running', 'loading', 'waiting', 'queue', 'cooldown']);
+        const fallback = {
+            setState() {},
+            setProgress() {},
+            setMinimized() {},
+            syncTheme() {}
+        };
+
+        if (!canvas) {
+            host.dataset.dockFx = 'fallback';
+            return fallback;
+        }
+
+        const gl = canvas.getContext('webgl', {
+            alpha: true,
+            antialias: false,
+            depth: false,
+            stencil: false,
+            powerPreference: 'low-power',
+            premultipliedAlpha: true,
+            preserveDrawingBuffer: false
+        });
+
+        if (!gl) {
+            host.dataset.dockFx = 'fallback';
+            return fallback;
+        }
+
+        const vertexSource = `
+            attribute vec2 a_position;
+            void main() {
+                gl_Position = vec4(a_position, 0.0, 1.0);
+            }
+        `;
+        const fragmentSource = `
+            precision mediump float;
+            uniform vec2 u_resolution;
+            uniform float u_time;
+            uniform float u_activity;
+            uniform float u_progress;
+            uniform float u_dark;
+            uniform float u_hover;
+            uniform vec2 u_pointer;
+            uniform vec3 u_accent;
+            uniform vec3 u_state;
+            uniform vec3 u_surface;
+
+            float hash21(vec2 point) {
+                point = fract(point * vec2(123.34, 456.21));
+                point += dot(point, point + 45.32);
+                return fract(point.x * point.y);
+            }
+
+            float noise21(vec2 point) {
+                vec2 cell = floor(point);
+                vec2 local = fract(point);
+                local = local * local * (3.0 - 2.0 * local);
+
+                float bottomLeft = hash21(cell);
+                float bottomRight = hash21(cell + vec2(1.0, 0.0));
+                float topLeft = hash21(cell + vec2(0.0, 1.0));
+                float topRight = hash21(cell + vec2(1.0, 1.0));
+                return mix(
+                    mix(bottomLeft, bottomRight, local.x),
+                    mix(topLeft, topRight, local.x),
+                    local.y
+                );
+            }
+
+            float fbm(vec2 point) {
+                float value = 0.0;
+                float amplitude = 0.52;
+                mat2 turn = mat2(0.86, -0.51, 0.51, 0.86);
+                for (int octave = 0; octave < 4; octave++) {
+                    value += amplitude * noise21(point);
+                    point = turn * point * 2.03 + vec2(7.1, 11.7);
+                    amplitude *= 0.49;
+                }
+                return value;
+            }
+
+            void main() {
+                vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+                float aspect = u_resolution.x / max(u_resolution.y, 1.0);
+                vec2 p = (uv - 0.5) * vec2(aspect, 1.0);
+                float time = u_time * mix(0.18, 0.42, u_activity);
+
+                // 两层域扭曲让水纹拥有真实折射感，同时保持小画布上的清晰轮廓。
+                float firstField = fbm(p * 1.55 + vec2(time * 0.23, -time * 0.14));
+                float secondField = fbm(
+                    p * 2.18
+                    + vec2(-time * 0.18, time * 0.21)
+                    + vec2(firstField * 0.9, -firstField * 0.62)
+                );
+                vec2 warped = p + vec2(firstField - 0.5, secondField - 0.5) * 0.34;
+
+                float primaryCenter = 0.035
+                    + 0.11 * sin(warped.x * 2.7 - time * 1.48)
+                    + 0.035 * sin(warped.x * 7.6 + time * 0.72);
+                float secondaryCenter = -0.235
+                    + 0.064 * sin(warped.x * 4.4 + time * 0.94 + secondField * 2.4);
+                float primaryRibbon = exp(-10.5 * abs(warped.y - primaryCenter));
+                float secondaryRibbon = exp(-17.0 * abs(warped.y - secondaryCenter));
+
+                float causticPhase = warped.x * 9.8
+                    + warped.y * 13.5
+                    + (firstField - secondField) * 8.2
+                    - time * 3.1;
+                float caustic = pow(max(0.0, 1.0 - abs(sin(causticPhase))), 8.0)
+                    * (primaryRibbon + secondaryRibbon * 0.58);
+                float facets = smoothstep(
+                    0.78,
+                    0.98,
+                    noise21(warped * 12.0 + vec2(time * 0.72, -time * 0.46))
+                ) * primaryRibbon;
+
+                vec2 pointerPosition = (u_pointer - 0.5) * vec2(aspect, 1.0);
+                float pointerDistance = length(p - pointerPosition);
+                float pointerLens = exp(-7.5 * pointerDistance) * u_hover;
+                float pointerRim = exp(-52.0 * abs(pointerDistance - 0.19)) * u_hover;
+
+                float progressHead = exp(-58.0 * abs(uv.x - u_progress))
+                    * exp(-18.0 * abs(uv.y - 0.09));
+                float progressTrail = (1.0 - smoothstep(u_progress - 0.28, u_progress, uv.x))
+                    * exp(-22.0 * abs(uv.y - 0.085));
+                float progressWake = progressHead + progressTrail * 0.28;
+                float edgeFade = smoothstep(0.0, 0.08, uv.x)
+                    * smoothstep(0.0, 0.08, 1.0 - uv.x)
+                    * smoothstep(0.0, 0.12, uv.y)
+                    * smoothstep(0.0, 0.12, 1.0 - uv.y);
+
+                float colorField = clamp(0.26 + firstField * 0.46 + caustic * 0.22, 0.0, 1.0);
+                vec3 deepGlass = mix(u_accent, u_state, colorField);
+                vec3 fluid = mix(u_surface, deepGlass, 0.48 + primaryRibbon * 0.24);
+                vec3 pearl = mix(deepGlass, vec3(1.0), mix(0.1, 0.34, u_dark));
+                float specular = clamp(
+                    caustic * 0.7
+                    + facets * 0.42
+                    + pointerRim * 0.36
+                    + progressHead * 0.32,
+                    0.0,
+                    1.0
+                );
+                fluid = mix(fluid, pearl, specular);
+
+                float energy = primaryRibbon * 0.45
+                    + secondaryRibbon * 0.2
+                    + caustic * 0.52
+                    + facets * 0.18
+                    + pointerLens * 0.16
+                    + pointerRim * 0.18
+                    + progressWake * (0.12 + 0.13 * u_activity);
+                float alpha = edgeFade
+                    * (mix(0.028, 0.052, u_dark) + energy * mix(0.18, 0.36, u_activity))
+                    * mix(0.92, 1.12, u_dark);
+
+                gl_FragColor = vec4(fluid, clamp(alpha, 0.0, 0.58));
+            }
+        `;
+
+        function compileShader(type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        const vertexShader = compileShader(gl.VERTEX_SHADER, vertexSource);
+        const fragmentShader = compileShader(gl.FRAGMENT_SHADER, fragmentSource);
+        if (!vertexShader || !fragmentShader) {
+            host.dataset.dockFx = 'fallback';
+            return fallback;
+        }
+
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+        gl.deleteShader(vertexShader);
+        gl.deleteShader(fragmentShader);
+
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            gl.deleteProgram(program);
+            host.dataset.dockFx = 'fallback';
+            return fallback;
+        }
+
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(
+            gl.ARRAY_BUFFER,
+            new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
+            gl.STATIC_DRAW
+        );
+        gl.useProgram(program);
+        const positionLocation = gl.getAttribLocation(program, 'a_position');
+        gl.enableVertexAttribArray(positionLocation);
+        gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+        const uniforms = {
+            resolution: gl.getUniformLocation(program, 'u_resolution'),
+            time: gl.getUniformLocation(program, 'u_time'),
+            activity: gl.getUniformLocation(program, 'u_activity'),
+            progress: gl.getUniformLocation(program, 'u_progress'),
+            dark: gl.getUniformLocation(program, 'u_dark'),
+            hover: gl.getUniformLocation(program, 'u_hover'),
+            pointer: gl.getUniformLocation(program, 'u_pointer'),
+            accent: gl.getUniformLocation(program, 'u_accent'),
+            state: gl.getUniformLocation(program, 'u_state'),
+            surface: gl.getUniformLocation(program, 'u_surface')
+        };
+
+        let state = refs.shell.dataset.state || 'idle';
+        let progress = 0;
+        let frameId = null;
+        let lastDrawAt = 0;
+        let hovered = false;
+        let contextLost = false;
+        let paletteDirty = true;
+        let pointer = { x: 0.5, y: 0.5 };
+        let pointerTarget = { x: 0.5, y: 0.5 };
+        let palette = {
+            accent: [0.18, 0.44, 0.35],
+            state: [0.18, 0.44, 0.35],
+            surface: [0.98, 0.98, 0.96]
+        };
+
+        function vectorFromColor(color, fallbackColor) {
+            return color
+                ? [color.red / 255, color.green / 255, color.blue / 255]
+                : fallbackColor;
+        }
+
+        function syncPalette() {
+            const stateColor = resolveCssColor(getComputedStyle(refs.dockStateLabel).color);
+            const accentColor = readPageColorToken('--tertiary', '--d-link-color', '--accent') || stateColor;
+            const surfaceColor = readVisiblePageBackground()
+                || resolveCssColor(getComputedStyle(refs.dock).backgroundColor);
+            palette = {
+                state: vectorFromColor(stateColor, palette.state),
+                accent: vectorFromColor(accentColor, palette.accent),
+                surface: vectorFromColor(surfaceColor, palette.surface)
+            };
+            paletteDirty = false;
+        }
+
+        function resizeCanvas() {
+            const rect = canvas.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) {
+                return false;
+            }
+
+            const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+            const width = Math.max(1, Math.round(rect.width * pixelRatio));
+            const height = Math.max(1, Math.round(rect.height * pixelRatio));
+            if (canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
+                gl.viewport(0, 0, width, height);
+            }
+            return true;
+        }
+
+        function activityForState() {
+            if (animatedStates.has(state)) {
+                return 1;
+            }
+            if (state === 'done') {
+                return 0.48;
+            }
+            if (state === 'paused') {
+                return 0.14;
+            }
+            return hovered ? 0.5 : 0.28;
+        }
+
+        function draw(timestamp = performance.now()) {
+            if (contextLost || settings.minimized !== true || !resizeCanvas()) {
+                return;
+            }
+
+            if (paletteDirty) {
+                syncPalette();
+            }
+            pointer.x += (pointerTarget.x - pointer.x) * 0.2;
+            pointer.y += (pointerTarget.y - pointer.y) * 0.2;
+            gl.useProgram(program);
+            gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
+            gl.uniform1f(uniforms.time, timestamp / 1000);
+            gl.uniform1f(uniforms.activity, activityForState());
+            gl.uniform1f(uniforms.progress, clamp(progress, 0, 1));
+            gl.uniform1f(uniforms.dark, host.dataset.theme === 'dark' ? 1 : 0);
+            gl.uniform1f(uniforms.hover, hovered ? 1 : 0);
+            gl.uniform2f(uniforms.pointer, pointer.x, pointer.y);
+            gl.uniform3fv(uniforms.accent, palette.accent);
+            gl.uniform3fv(uniforms.state, palette.state);
+            gl.uniform3fv(uniforms.surface, palette.surface);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        function shouldAnimate() {
+            return settings.minimized === true
+                && !document.hidden
+                && !reducedMotion?.matches
+                && (animatedStates.has(state) || hovered);
+        }
+
+        function animate(timestamp) {
+            if (!shouldAnimate() || contextLost) {
+                frameId = null;
+                draw(timestamp);
+                return;
+            }
+
+            // 小尺寸材质层限制在约 30fps，视觉连续且不会长期占用完整刷新率。
+            if (timestamp - lastDrawAt >= 32) {
+                lastDrawAt = timestamp;
+                draw(timestamp);
+            }
+            frameId = requestAnimationFrame(animate);
+        }
+
+        function wake() {
+            if (settings.minimized !== true || contextLost) {
+                if (frameId !== null) {
+                    cancelAnimationFrame(frameId);
+                    frameId = null;
+                }
+                return;
+            }
+
+            draw();
+            if (shouldAnimate() && frameId === null) {
+                frameId = requestAnimationFrame(animate);
+            }
+        }
+
+        function updatePointer(event) {
+            const rect = refs.dock.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) {
+                return;
+            }
+
+            pointerTarget = {
+                x: clamp((event.clientX - rect.left) / rect.width, 0.02, 0.98),
+                // WebGL 纹理坐标从左下角开始，需要翻转浏览器的纵向坐标。
+                y: 1 - clamp((event.clientY - rect.top) / rect.height, 0.02, 0.98)
+            };
+        }
+
+        refs.dock.addEventListener('pointerenter', (event) => {
+            hovered = true;
+            updatePointer(event);
+            wake();
+        });
+        refs.dock.addEventListener('pointermove', (event) => {
+            updatePointer(event);
+            if (frameId === null) {
+                wake();
+            }
+        });
+        refs.dock.addEventListener('pointerleave', () => {
+            hovered = false;
+            pointerTarget = { x: 0.5, y: 0.5 };
+            wake();
+        });
+        canvas.addEventListener('webglcontextlost', (event) => {
+            event.preventDefault();
+            contextLost = true;
+            host.dataset.dockFx = 'fallback';
+            if (frameId !== null) {
+                cancelAnimationFrame(frameId);
+                frameId = null;
+            }
+        });
+        canvas.addEventListener('webglcontextrestored', () => {
+            // 浏览器恢复上下文后沿用 CSS 降级层，避免在页面阅读中重建着色器产生卡顿。
+            contextLost = true;
+            host.dataset.dockFx = 'fallback';
+        });
+        reducedMotion?.addEventListener?.('change', wake);
+        document.addEventListener('visibilitychange', wake);
+        window.addEventListener('resize', wake, { passive: true });
+
+        host.dataset.dockFx = 'webgl';
+        requestAnimationFrame(wake);
+
+        return {
+            setState(nextState) {
+                if (state === nextState) {
+                    return;
+                }
+                state = nextState;
+                paletteDirty = true;
+                wake();
+            },
+            setProgress(nextProgress) {
+                progress = clamp(Number(nextProgress) || 0, 0, 1);
+                if (!shouldAnimate()) {
+                    wake();
+                }
+            },
+            setMinimized() {
+                requestAnimationFrame(wake);
+            },
+            syncTheme() {
+                paletteDirty = true;
+                wake();
+            }
+        };
+    }
+
+    dockFluidEffect = createDockFluidEffect();
 
     function dockDetailForState(state) {
         switch (state) {
             case 'running':
                 return `${Math.round(settings.speed)} 像素/秒`;
             case 'loading':
-                return '衔接新楼层';
+                return '正在衔接楼层';
             case 'waiting':
-                return '确认帖子末尾';
+                return '正在确认末尾';
             case 'queue':
                 return `${settings.queueLimit} 篇队列`;
             case 'cooldown':
                 return '即将下一篇';
             case 'paused':
-                return '位置已保留';
+                return '点按继续';
             case 'done':
-                return '已读到末尾';
+                return '点按重读';
             default:
-                return '点击展开';
+                return '点按开始';
         }
     }
 
     function renderDockState(state = refs.shell.dataset.state || 'idle') {
         const copy = STATE_COPY[state] || STATE_COPY.idle;
         const detail = dockDetailForState(state);
+        const activeReading = ['running', 'loading', 'waiting'].includes(state);
+        const queueActionActive = queueUiActive && isListRoute() && settings.mode === 'queue';
+        const actionLabel = queueActionActive
+            ? '停止连续阅读'
+            : activeReading
+                ? '暂停阅读'
+                : state === 'paused'
+                    ? '继续阅读'
+                    : state === 'done'
+                        ? '重新阅读'
+                        : '开始阅读';
         refs.dockStateLabel.textContent = copy.chip;
         refs.dockStateDetail.textContent = detail;
-        refs.dock.title = `${copy.title} · 点击展开`;
-        const accessibleDetail = state === 'idle' ? '' : `，${detail}`;
-        refs.dock.setAttribute('aria-label', `${copy.title}${accessibleDetail}，点击展开阅读控制台`);
+        refs.dock.setAttribute('aria-label', `澜阅快捷控制，${copy.title}`);
+        refs.dockControl.title = `${actionLabel} · 拖动可移动`;
+        refs.dockControl.setAttribute('aria-label', `${copy.title}，${detail}，${actionLabel}`);
+        refs.dockExpand.setAttribute('aria-label', `展开阅读设置，当前${copy.title}`);
+        dockFluidEffect?.setState(state);
     }
 
     function getShellLayoutRect() {
@@ -1797,6 +2564,7 @@
 
         settings.minimized = nextMinimized;
         refs.shell.dataset.minimized = String(settings.minimized);
+        dockFluidEffect?.setMinimized(nextMinimized);
 
         // offsetWidth / offsetHeight 会同步刷新切换后的布局，避免连续点击时遗留定位帧覆盖复位结果。
         const targetRect = getShellLayoutRect();
@@ -1861,6 +2629,7 @@
     function setQueueActiveUi(active) {
         queueUiActive = Boolean(active);
         refs.queueStop.hidden = !queueUiActive;
+        renderDockState();
     }
 
     function createDragController() {
@@ -1935,7 +2704,8 @@
 
         function onPointerDown(event) {
             const handle = event.currentTarget;
-            if (event.button !== 0 || event.target.closest('button:not(.dock), input, label')) {
+            const interactiveTarget = event.target.closest('button, input, label');
+            if (event.button !== 0 || (interactiveTarget && interactiveTarget !== handle)) {
                 return;
             }
 
@@ -2064,6 +2834,9 @@
         let manualPauseReadyAt = 0;
         let lastUiRefreshAt = 0;
         let detailOverride = '';
+        let readingPlan = null;
+        let readingPlanElapsedMs = 0;
+        let nextPlanRefreshAt = 0;
 
         function elapsed() {
             return elapsedBeforeRun + (running && activeSince ? performance.now() - activeSince : 0);
@@ -2078,7 +2851,71 @@
                 + Math.random() * intervalRange;
         }
 
+        function normalizeReadingPlan(plan) {
+            if (!plan) {
+                return null;
+            }
+
+            const postCount = Math.max(1, Math.round(Number(plan.postCount) || 1));
+            const minimumMs = clamp(
+                Number(plan.minimumMs) || CONFIG.queueReadBaseMs + postCount * CONFIG.queueReadPerPostMs,
+                CONFIG.queueReadMinMs,
+                CONFIG.queueReadMaxMs
+            );
+            return { postCount, minimumMs };
+        }
+
+        function applyReadingPlan(plan) {
+            const next = normalizeReadingPlan(plan);
+            if (!next) {
+                return false;
+            }
+
+            const merged = readingPlan
+                ? {
+                    postCount: Math.max(readingPlan.postCount, next.postCount),
+                    minimumMs: Math.max(readingPlan.minimumMs, next.minimumMs)
+                }
+                : next;
+            const changed = !readingPlan
+                || merged.postCount !== readingPlan.postCount
+                || merged.minimumMs !== readingPlan.minimumMs;
+            readingPlan = merged;
+            return changed;
+        }
+
+        function refreshReadingPlan(timestamp, force = false) {
+            if (!readingPlan || (!force && timestamp < nextPlanRefreshAt)) {
+                return false;
+            }
+
+            nextPlanRefreshAt = timestamp + CONFIG.queuePlanRefreshMs;
+            return applyReadingPlan(createQueueReadingPlan());
+        }
+
+        function readingPlanRemainingMs() {
+            return readingPlan
+                ? Math.max(0, readingPlan.minimumMs - readingPlanElapsedMs)
+                : 0;
+        }
+
+        function readingPlanSummary() {
+            return readingPlan
+                ? `连续阅读 · ${readingPlan.postCount} 层 · 至少 ${formatReadingDuration(readingPlan.minimumMs)}`
+                : '';
+        }
+
+        function readingPlanWaitingDetail() {
+            return readingPlan
+                ? `按 ${readingPlan.postCount} 层规划 · 还需 ${formatReadingDuration(readingPlanRemainingMs())}`
+                : '';
+        }
+
         function setState(nextState, detail = '') {
+            if (state === nextState && detailOverride === detail) {
+                return;
+            }
+
             state = nextState;
             detailOverride = detail;
             renderState();
@@ -2102,7 +2939,7 @@
                     : '开始阅读';
             refs.toggleButton.setAttribute(
                 'aria-label',
-                queueActionActive ? '停止连续阅读' : running ? '暂停自动阅读' : '开始自动阅读'
+                queueActionActive ? '停止连续阅读' : running ? '暂停阅读' : '开始阅读'
             );
             renderDockState(state);
         }
@@ -2120,6 +2957,7 @@
             refs.distanceValue.textContent = formatScreens(distance);
             refs.shell.style.setProperty('--progress', `${metrics.progress * 3.6}deg`);
             refs.shell.style.setProperty('--progress-percent', `${metrics.progress}%`);
+            dockFluidEffect?.setProgress(metrics.progress / 100);
         }
 
         function stop(nextState = 'paused', detail = '') {
@@ -2158,38 +2996,54 @@
                 return;
             }
 
-            const deltaSeconds = clamp((timestamp - lastFrameAt) / 1000, 0, 0.08);
+            const frameGapMs = Math.max(0, timestamp - lastFrameAt);
+            const deltaSeconds = clamp(frameGapMs / 1000, 0, 0.08);
             lastFrameAt = timestamp;
+            // 连续阅读计划只累计可见页面中的有效运行时间，暂停或后台节流时间不会被算入。
+            if (readingPlan && !document.hidden) {
+                readingPlanElapsedMs += Math.min(frameGapMs, 250);
+            }
+            const readingPlanChanged = refreshReadingPlan(timestamp);
             if (timestamp >= nextSpeedVariationAt) {
                 scheduleSpeedVariation(timestamp);
             }
-
-            // 设定值代表长期平均速度；小幅、缓慢的变化用于减少机械感，不用于模拟点击或规避检测。
-            const targetSpeed = settings.speed * speedMultiplier;
-            currentSpeed += (targetSpeed - currentSpeed) * Math.min(1, deltaSeconds * 1.8);
 
             const before = getScrollMetrics();
             const heightGrew = before.height > lastHeight + 2;
             lastHeight = before.height;
 
+            // 用户设定值仍是期望平均速度；连续读只在可能过早读完时降低上限，不会把慢速强行加快。
+            const requestedSpeed = settings.speed * speedMultiplier;
+            const remainingPlanMs = readingPlanRemainingMs();
+            const paceLimit = readingPlan && remainingPlanMs > 0
+                ? Math.max(1, before.remaining / Math.max(remainingPlanMs / 1000, 0.001))
+                : Number.POSITIVE_INFINITY;
+            const targetSpeed = Math.min(requestedSpeed, paceLimit);
+            currentSpeed += (targetSpeed - currentSpeed) * Math.min(1, deltaSeconds * 1.8);
+            currentSpeed = Math.min(currentSpeed, paceLimit);
+
+            if (readingPlanChanged && state === 'running') {
+                setState('running', readingPlanSummary());
+            }
+
             if (heightGrew) {
                 bottomReachedAt = 0;
-                setState('loading');
+                setState('loading', readingPlan ? `已识别 ${readingPlan.postCount} 层 · 正在衔接后续内容` : '');
             }
 
             if (before.remaining > CONFIG.bottomThreshold) {
                 bottomReachedAt = 0;
                 if (!heightGrew && state !== 'running') {
-                    setState('running');
+                    setState('running', readingPlanSummary());
                 }
 
-                // 低速或高刷新率下，单帧位移可能不足 1px；浏览器逐帧取整会导致页面完全不动。
-                // 先累计小数像素，只提交整数部分，保证 px/s 在不同刷新率下都能真实生效。
+                // 低速或高刷新率下，单帧位移可能不足 1px；先累计后再提交整数位移。
+                // 高 DPI/页面缩放会把 1px 量化成不同的实际距离，因此按真实位移回补误差。
                 scrollRemainder += currentSpeed * deltaSeconds;
                 const scrollPixels = Math.trunc(scrollRemainder);
                 if (scrollPixels !== 0) {
                     window.scrollBy(0, scrollPixels);
-                    scrollRemainder -= scrollPixels;
+                    scrollRemainder -= getScrollMetrics().top - before.top;
                 }
             } else {
                 scrollRemainder = 0;
@@ -2199,12 +3053,18 @@
 
                 const waited = timestamp - bottomReachedAt;
                 const remainingWait = Math.max(0, CONFIG.bottomWaitMs - waited);
-                if (remainingWait <= 0) {
+                const remainingReadingTime = readingPlanRemainingMs();
+                if (remainingWait <= 0 && remainingReadingTime <= 0) {
                     stop('done');
                     return;
                 }
 
-                setState('waiting', `等待懒加载 · ${Math.ceil(remainingWait / 1000)} 秒`);
+                setState(
+                    'waiting',
+                    remainingReadingTime > 0
+                        ? readingPlanWaitingDetail()
+                        : `等待懒加载 · ${Math.ceil(remainingWait / 1000)} 秒`
+                );
                 // 持续贴近底部，以便触发 Discourse 的懒加载观察器。
                 window.scrollTo(0, before.maximum);
             }
@@ -2215,9 +3075,16 @@
             frameId = requestAnimationFrame(tick);
         }
 
-        function start() {
+        function start(plan) {
             if (running || !isTopicRoute()) {
                 return;
+            }
+
+            if (plan !== undefined) {
+                readingPlan = null;
+                readingPlanElapsedMs = 0;
+                nextPlanRefreshAt = 0;
+                applyReadingPlan(plan);
             }
 
             running = true;
@@ -2227,11 +3094,21 @@
             lastFrameAt = activeSince;
             lastHeight = getScrollMetrics().height;
             bottomReachedAt = 0;
-            currentSpeed = Math.min(settings.speed, Math.max(8, settings.speed * 0.35));
+            refreshReadingPlan(activeSince, true);
+            const initialMetrics = getScrollMetrics();
+            const initialPlanMs = readingPlanRemainingMs();
+            const initialPaceLimit = readingPlan && initialPlanMs > 0
+                ? Math.max(1, initialMetrics.remaining / Math.max(initialPlanMs / 1000, 0.001))
+                : Number.POSITIVE_INFINITY;
+            currentSpeed = Math.min(
+                settings.speed,
+                Math.max(8, settings.speed * 0.35),
+                initialPaceLimit
+            );
             scrollRemainder = 0;
             speedMultiplier = 1;
             nextSpeedVariationAt = activeSince + CONFIG.speedVariationIntervalMinMs;
-            setState('running');
+            setState('running', readingPlanSummary());
             frameId = requestAnimationFrame(tick);
         }
 
@@ -2244,6 +3121,9 @@
         }
 
         function resetForRoute() {
+            readingPlan = null;
+            readingPlanElapsedMs = 0;
+            nextPlanRefreshAt = 0;
             stop('idle');
             distance = 0;
             elapsedBeforeRun = 0;
@@ -2775,7 +3655,8 @@
             return;
         }
 
-        const shouldStart = queueManager.shouldAutoStartCurrentTopic()
+        const shouldStartQueue = queueManager.shouldAutoStartCurrentTopic();
+        const shouldStart = shouldStartQueue
             || (!queueManager.isActive() && settings.mode === 'auto');
         if (!shouldStart) {
             pendingVisibleAutoStart = false;
@@ -2804,7 +3685,7 @@
             return;
         }
 
-        scrollController.start();
+        scrollController.start(shouldStartQueue ? createQueueReadingPlan() : null);
     }
 
     function handlePrimaryAction() {
@@ -2832,14 +3713,16 @@
         }
 
         const action = actionElement.dataset.action;
-        if (action === 'toggle') {
+        if (settings.minimized && dragController.wasRecentDrag()) {
+            return;
+        }
+
+        if (action === 'toggle' || action === 'dock-toggle') {
             handlePrimaryAction();
         } else if (action === 'minimize') {
             setMinimized(true);
         } else if (action === 'expand') {
-            if (!dragController.wasRecentDrag()) {
-                setMinimized(false);
-            }
+            setMinimized(false);
         } else if (action === 'reset-position') {
             dragController.reset();
         } else if (action === 'stop-queue') {
