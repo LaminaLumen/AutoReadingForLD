@@ -85,7 +85,10 @@
         }
 
         .topic-post:first-child { border-top: 0; }
-        .post-number { margin-bottom: 14px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+        .post-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+        .post-number { color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+        .read-state { width: 7px; height: 7px; border-radius: 50%; background: #45a8df; }
+        .read-state.read { visibility: hidden; opacity: 0; transition: visibility 1s, opacity 1s ease-out; }
     </style>
 </head>
 <body>
@@ -131,7 +134,10 @@
                 const postNumber = start + offset;
                 return `
                     <section class="topic-post" data-post-id="${postNumber}" data-post-number="${postNumber}">
-                        <div class="post-number">第 ${postNumber} 层</div>
+                        <div class="post-meta">
+                            <div class="post-number">第 ${postNumber} 层</div>
+                            <div class="read-state" title="帖子未读" aria-label="第 ${postNumber} 层未读"></div>
+                        </div>
                         ${Array.from({ length: 3 }, (_, paragraphIndex) => `
                             <p>这是第 ${postNumber} 层的第 ${paragraphIndex + 1} 段验证内容。连续阅读需要根据楼层规模安排足够的停留时间，同时保持稳定、自然的滚动节奏，并在正文继续加载时及时延长本篇计划。</p>
                         `).join('')}
@@ -160,6 +166,59 @@
                     );
                 }, 8000);
             }
+
+            const reportMode = params.get('report') || 'normal';
+            const reportDelayMs = Math.min(
+                30000,
+                Math.max(500, Number(params.get('reportDelay')) || 2200)
+            );
+            const fixtureReport = {
+                mode: reportMode,
+                delayMs: reportDelayMs,
+                exposureMs: new Map(),
+                reported: [],
+                sentBatches: []
+            };
+            window.__readingFixture = fixtureReport;
+
+            let lastReportSampleAt = performance.now();
+            window.setInterval(() => {
+                const now = performance.now();
+                const delta = Math.min(300, now - lastReportSampleAt);
+                lastReportSampleAt = now;
+                if (document.hidden) {
+                    return;
+                }
+
+                const newlyReported = [];
+                document.querySelectorAll('.topic-post').forEach((post) => {
+                    const postNumber = Number(post.dataset.postNumber);
+                    const readState = post.querySelector('.read-state:not(.read)');
+                    if (!postNumber || !readState) {
+                        return;
+                    }
+
+                    const rect = post.getBoundingClientRect();
+                    if (rect.bottom <= 62 || rect.top >= innerHeight) {
+                        return;
+                    }
+
+                    const exposure = (fixtureReport.exposureMs.get(postNumber) || 0) + delta;
+                    fixtureReport.exposureMs.set(postNumber, exposure);
+                    if (reportMode !== 'stuck' && exposure >= reportDelayMs) {
+                        readState.classList.add('read');
+                        fixtureReport.reported.push(postNumber);
+                        newlyReported.push(postNumber);
+                    }
+                });
+
+                if (newlyReported.length > 0) {
+                    fixtureReport.sentBatches.push({ posts: newlyReported, at: now });
+                    document.dispatchEvent(new CustomEvent('topic:timings-sent', {
+                        detail: { timings: Object.fromEntries(newlyReported.map((postNumber) => [postNumber, reportDelayMs])) }
+                    }));
+                }
+            }, 250);
         }
     </script>
     <script src="/Lanyue.user.js"></script>

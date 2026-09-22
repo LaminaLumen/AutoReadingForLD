@@ -2,7 +2,7 @@
 // @name         澜阅
 // @name:zh-CN   澜阅 - LINUX DO 沉浸阅读器
 // @namespace    https://github.com/LaminaLumen/Lanyue
-// @version      2.1.0
+// @version      2.1.1
 // @description  让 LINUX DO 长帖按自然节奏缓缓展开，支持当前帖、自动帖与连续阅读。
 // @author       pboy, 澜阅 contributors
 // @license      MIT
@@ -26,10 +26,11 @@
 
     const APP = Object.freeze({
         name: '澜阅',
-        version: '2.1.0',
+        version: '2.1.1',
         rootId: 'lanyue-reader-root',
         storageKey: 'lanyue:settings:v1',
-        queueStorageKey: 'lanyue:queue:v1'
+        queueStorageKey: 'lanyue:queue:v1',
+        recoveryStorageKey: 'lanyue:read-recovery:v1'
     });
 
     const CONFIG = Object.freeze({
@@ -56,6 +57,18 @@
         queueReadMinMs: 30000,
         queueReadMaxMs: 10 * 60 * 1000,
         queuePlanRefreshMs: 1000,
+        readStateScanMs: 180,
+        readConfirmMinMs: 2800,
+        readConfirmMaxMs: 4200,
+        readConfirmBandTopRatio: 0.18,
+        readConfirmBandBottomRatio: 0.82,
+        readConfirmMinVisiblePx: 56,
+        readConfirmRetryPulseMs: 1600,
+        readConfirmReloadAfterBatches: 2,
+        readConfirmFailureWindowMs: 45000,
+        bottomReportTimeoutMs: 14000,
+        bottomReportQuietMs: 900,
+        bottomReportRetryPulseMs: 5000,
         manualPauseGraceMs: 900,
         uiRefreshMs: 120,
         edgePadding: 12,
@@ -78,7 +91,8 @@
         idle: { chip: '就绪', title: '准备阅读', detail: '选择模式，开始后自动向下滚动' },
         running: { chip: '阅读中', title: '正在向下阅读', detail: '再次点击即可暂停' },
         loading: { chip: '载入', title: '正在衔接后续楼层', detail: '内容就绪后继续阅读' },
-        waiting: { chip: '确认底部', title: '等待后续内容', detail: '稍后确认是否已到末尾' },
+        waiting: { chip: '确认中', title: '正在确认阅读记录', detail: '等待站点记录当前楼层' },
+        recovering: { chip: '恢复', title: '正在恢复阅读记录', detail: '即将从当前楼层继续' },
         queue: { chip: '队列', title: '连续阅读已就绪', detail: '将在当前标签页逐篇阅读' },
         cooldown: { chip: '间隔', title: '这一篇已读完', detail: '稍后进入下一篇' },
         paused: { chip: '已暂停', title: '停在当前位置', detail: '进度与本次统计已保留' },
@@ -863,6 +877,12 @@
                 transform: translateY(1px);
             }
 
+            .main-control:disabled,
+            .dock__control:disabled {
+                cursor: wait;
+                opacity: 0.78;
+            }
+
             .speed-settings {
                 display: grid;
                 gap: 8px;
@@ -1521,6 +1541,7 @@
 
             .shell[data-state="loading"],
             .shell[data-state="waiting"],
+            .shell[data-state="recovering"],
             .shell[data-state="cooldown"],
             .shell[data-state="paused"] {
                 --state-color: var(--warning);
@@ -1537,6 +1558,7 @@
             .shell[data-state="done"] [data-dock-icon="done"],
             .shell[data-state="loading"] [data-dock-icon="busy"],
             .shell[data-state="waiting"] [data-dock-icon="busy"],
+            .shell[data-state="recovering"] [data-dock-icon="busy"],
             .shell[data-state="cooldown"] [data-dock-icon="busy"] {
                 display: block;
             }
@@ -1552,6 +1574,7 @@
             .shell[data-state="running"] .dock__fluid,
             .shell[data-state="loading"] .dock__fluid,
             .shell[data-state="waiting"] .dock__fluid,
+            .shell[data-state="recovering"] .dock__fluid,
             .shell[data-state="queue"] .dock__fluid,
             .shell[data-state="cooldown"] .dock__fluid {
                 opacity: 0.94;
@@ -1578,7 +1601,8 @@
 
             :host([data-dock-fx="fallback"]) .shell[data-state="running"] .dock::before,
             :host([data-dock-fx="fallback"]) .shell[data-state="loading"] .dock::before,
-            :host([data-dock-fx="fallback"]) .shell[data-state="waiting"] .dock::before {
+            :host([data-dock-fx="fallback"]) .shell[data-state="waiting"] .dock::before,
+            :host([data-dock-fx="fallback"]) .shell[data-state="recovering"] .dock::before {
                 background:
                     radial-gradient(circle at 18% 18%, color-mix(in srgb, var(--state-color) 24%, transparent), transparent 35%),
                     radial-gradient(circle at 72% 80%, color-mix(in srgb, var(--page-accent) 15%, transparent), transparent 44%),
@@ -2050,7 +2074,7 @@
     function createDockFluidEffect() {
         const canvas = refs.dockFluid;
         const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
-        const animatedStates = new Set(['running', 'loading', 'waiting', 'queue', 'cooldown']);
+        const animatedStates = new Set(['running', 'loading', 'waiting', 'recovering', 'queue', 'cooldown']);
         const fallback = {
             setState() {},
             setProgress() {},
@@ -2477,7 +2501,9 @@
             case 'loading':
                 return '正在衔接楼层';
             case 'waiting':
-                return '正在确认末尾';
+                return '正在确认记录';
+            case 'recovering':
+                return '重载当前楼层';
             case 'queue':
                 return `${settings.queueLimit} 篇队列`;
             case 'cooldown':
@@ -2495,21 +2521,25 @@
         const copy = STATE_COPY[state] || STATE_COPY.idle;
         const detail = dockDetailForState(state);
         const activeReading = ['running', 'loading', 'waiting'].includes(state);
+        const recovering = state === 'recovering';
         const queueActionActive = queueUiActive && isListRoute() && settings.mode === 'queue';
         const actionLabel = queueActionActive
             ? '停止连续阅读'
-            : activeReading
-                ? '暂停阅读'
-                : state === 'paused'
-                    ? '继续阅读'
-                    : state === 'done'
-                        ? '重新阅读'
-                        : '开始阅读';
+            : recovering
+                ? '正在恢复'
+                : activeReading
+                    ? '暂停阅读'
+                    : state === 'paused'
+                        ? '继续阅读'
+                        : state === 'done'
+                            ? '重新阅读'
+                            : '开始阅读';
         refs.dockStateLabel.textContent = copy.chip;
         refs.dockStateDetail.textContent = detail;
         refs.dock.setAttribute('aria-label', `澜阅快捷控制，${copy.title}`);
         refs.dockControl.title = `${actionLabel} · 拖动可移动`;
         refs.dockControl.setAttribute('aria-label', `${copy.title}，${detail}，${actionLabel}`);
+        refs.dockControl.disabled = recovering;
         refs.dockExpand.setAttribute('aria-label', `展开阅读设置，当前${copy.title}`);
         dockFluidEffect?.setState(state);
     }
@@ -2816,6 +2846,7 @@
     });
 
     let handleScrollDone = () => {};
+    let handlePersistentUnread = () => false;
 
     function createScrollController() {
         let state = 'idle';
@@ -2823,7 +2854,10 @@
         let frameId = null;
         let lastFrameAt = 0;
         let lastHeight = getScrollMetrics().height;
-        let bottomReachedAt = 0;
+        let bottomWaitElapsedMs = 0;
+        let bottomReportElapsedMs = 0;
+        let bottomReportQuietElapsedMs = 0;
+        let bottomReportRetryPulsed = false;
         let currentSpeed = 0;
         let speedMultiplier = 1;
         let nextSpeedVariationAt = 0;
@@ -2837,6 +2871,11 @@
         let readingPlan = null;
         let readingPlanElapsedMs = 0;
         let nextPlanRefreshAt = 0;
+        let viewportConfirmation = null;
+        let nextReadStateScanAt = 0;
+        let consecutiveReadStateTimeouts = 0;
+        let lastReadStateTimeoutAt = 0;
+        const attemptedReadPosts = new Set();
 
         function elapsed() {
             return elapsedBeforeRun + (running && activeSince ? performance.now() - activeSince : 0);
@@ -2849,6 +2888,180 @@
             nextSpeedVariationAt = timestamp
                 + CONFIG.speedVariationIntervalMinMs
                 + Math.random() * intervalRange;
+        }
+
+        function resetBottomTracking() {
+            bottomWaitElapsedMs = 0;
+            bottomReportElapsedMs = 0;
+            bottomReportQuietElapsedMs = 0;
+            bottomReportRetryPulsed = false;
+        }
+
+        function postNumberForReadState(indicator) {
+            const numberedPost = indicator.closest('[data-post-number]');
+            const dataNumber = Number(numberedPost?.getAttribute('data-post-number'));
+            if (Number.isFinite(dataNumber) && dataNumber > 0) {
+                return Math.floor(dataNumber);
+            }
+
+            const articleId = indicator.closest('article[id^="post_"]')?.id || '';
+            const idNumber = Number(articleId.match(/^post_(\d+)$/)?.[1]);
+            return Number.isFinite(idNumber) && idNumber > 0 ? Math.floor(idNumber) : 0;
+        }
+
+        function postElementForReadState(indicator) {
+            return indicator.closest('.topic-post')
+                || indicator.closest('article[id^="post_"]')
+                || indicator.closest('[data-post-number]');
+        }
+
+        function visibleUnreadPostNumbers(readingBand = false) {
+            const viewportHeight = Math.max(window.innerHeight, 1);
+            const bandTop = readingBand
+                ? viewportHeight * CONFIG.readConfirmBandTopRatio
+                : 0;
+            const bandBottom = readingBand
+                ? viewportHeight * CONFIG.readConfirmBandBottomRatio
+                : viewportHeight;
+            const numbers = new Set();
+
+            document.querySelectorAll('.read-state:not(.read)').forEach((indicator) => {
+                const postNumber = postNumberForReadState(indicator);
+                const postElement = postElementForReadState(indicator);
+                if (!postNumber || !postElement) {
+                    return;
+                }
+
+                const rect = postElement.getBoundingClientRect();
+                const overlap = Math.min(rect.bottom, bandBottom) - Math.max(rect.top, bandTop);
+                const requiredOverlap = readingBand
+                    ? Math.min(CONFIG.readConfirmMinVisiblePx, Math.max(18, rect.height * 0.2))
+                    : 1;
+                if (rect.width > 0 && rect.height > 0 && overlap >= requiredOverlap) {
+                    numbers.add(postNumber);
+                }
+            });
+
+            return [...numbers].sort((left, right) => left - right);
+        }
+
+        function unreadPostNumbers(numbers) {
+            const unread = new Set(
+                [...document.querySelectorAll('.read-state:not(.read)')]
+                    .map(postNumberForReadState)
+                    .filter(Boolean)
+            );
+            return numbers.filter((postNumber) => unread.has(postNumber));
+        }
+
+        function formatPostNumbers(numbers) {
+            if (numbers.length === 0) {
+                return '当前楼层';
+            }
+            if (numbers.length === 1) {
+                return `${numbers[0]} 层`;
+            }
+            return `${numbers[0]}–${numbers[numbers.length - 1]} 层`;
+        }
+
+        function pulseNativeScroll() {
+            const metrics = getScrollMetrics();
+            const offset = metrics.remaining >= 1 ? 1 : metrics.top >= 1 ? -1 : 0;
+            if (offset !== 0) {
+                // 产生真实的滚动事件，让 Discourse 重新核对可见楼层，不直接触碰其上报接口。
+                window.scrollBy(0, offset);
+            }
+        }
+
+        function startViewportConfirmation(numbers) {
+            const freshNumbers = numbers.filter((postNumber) => !attemptedReadPosts.has(postNumber));
+            if (freshNumbers.length === 0) {
+                return false;
+            }
+
+            viewportConfirmation = {
+                numbers: freshNumbers,
+                elapsedMs: 0,
+                limitMs: CONFIG.readConfirmMinMs
+                    + Math.random() * (CONFIG.readConfirmMaxMs - CONFIG.readConfirmMinMs),
+                retryPulsed: false
+            };
+            return true;
+        }
+
+        function requestPersistentUnreadRecovery(numbers) {
+            stop('paused', `站点连续未确认 ${formatPostNumbers(numbers)}`);
+            queueMicrotask(() => {
+                const handled = handlePersistentUnread(numbers);
+                if (!handled) {
+                    setState('paused', '阅读记录仍未确认，已停在当前帖');
+                }
+            });
+        }
+
+        function updateViewportConfirmation(timestamp, activeFrameMs) {
+            if (!viewportConfirmation && timestamp >= nextReadStateScanAt) {
+                nextReadStateScanAt = timestamp + CONFIG.readStateScanMs;
+                startViewportConfirmation(visibleUnreadPostNumbers(true));
+            }
+
+            if (!viewportConfirmation) {
+                return false;
+            }
+
+            viewportConfirmation.elapsedMs += activeFrameMs;
+            if (
+                !viewportConfirmation.retryPulsed
+                && viewportConfirmation.elapsedMs >= CONFIG.readConfirmRetryPulseMs
+            ) {
+                viewportConfirmation.retryPulsed = true;
+                pulseNativeScroll();
+            }
+
+            let pendingNumbers = viewportConfirmation.numbers;
+            if (timestamp >= nextReadStateScanAt) {
+                nextReadStateScanAt = timestamp + CONFIG.readStateScanMs;
+                pendingNumbers = unreadPostNumbers(viewportConfirmation.numbers);
+            }
+
+            if (pendingNumbers.length === 0) {
+                viewportConfirmation.numbers.forEach((postNumber) => attemptedReadPosts.add(postNumber));
+                viewportConfirmation = null;
+                consecutiveReadStateTimeouts = 0;
+                setState('running', readingPlanSummary());
+                return false;
+            }
+
+            viewportConfirmation.numbers = pendingNumbers;
+            if (viewportConfirmation.elapsedMs >= viewportConfirmation.limitMs) {
+                pendingNumbers.forEach((postNumber) => attemptedReadPosts.add(postNumber));
+                viewportConfirmation = null;
+
+                if (timestamp - lastReadStateTimeoutAt <= CONFIG.readConfirmFailureWindowMs) {
+                    consecutiveReadStateTimeouts += 1;
+                } else {
+                    consecutiveReadStateTimeouts = 1;
+                }
+                lastReadStateTimeoutAt = timestamp;
+
+                if (consecutiveReadStateTimeouts >= CONFIG.readConfirmReloadAfterBatches) {
+                    requestPersistentUnreadRecovery(pendingNumbers);
+                    return true;
+                }
+
+                setState('running', readingPlanSummary());
+                return false;
+            }
+
+            const remainingSeconds = Math.max(
+                1,
+                Math.ceil((viewportConfirmation.limitMs - viewportConfirmation.elapsedMs) / 1000)
+            );
+            setState(
+                'waiting',
+                `正在确认 ${formatPostNumbers(pendingNumbers)} · 最多还需 ${remainingSeconds} 秒`
+            );
+            return true;
         }
 
         function normalizeReadingPlan(plan) {
@@ -2928,19 +3141,29 @@
             refs.stateChip.textContent = copy.chip;
             refs.stateTitle.textContent = copy.title;
             refs.stateDetail.textContent = detailOverride || copy.detail;
-            const controlIconState = queueActionActive ? 'stop' : running ? 'pause' : 'play';
+            const recovering = state === 'recovering';
+            const controlIconState = queueActionActive ? 'stop' : running || recovering ? 'pause' : 'play';
             refs.controlIcons.forEach((icon) => {
                 icon.toggleAttribute('hidden', icon.dataset.iconState !== controlIconState);
             });
             refs.controlLabel.textContent = queueActionActive
                 ? '停止连续阅读'
-                : running
-                    ? '暂停阅读'
-                    : '开始阅读';
+                : recovering
+                    ? '正在恢复'
+                    : running
+                        ? '暂停阅读'
+                        : '开始阅读';
             refs.toggleButton.setAttribute(
                 'aria-label',
-                queueActionActive ? '停止连续阅读' : running ? '暂停阅读' : '开始阅读'
+                queueActionActive
+                    ? '停止连续阅读'
+                    : recovering
+                        ? '正在恢复阅读记录'
+                        : running
+                            ? '暂停阅读'
+                            : '开始阅读'
             );
+            refs.toggleButton.disabled = recovering;
             renderDockState(state);
         }
 
@@ -2971,7 +3194,9 @@
             manualPauseReadyAt = 0;
             currentSpeed = 0;
             scrollRemainder = 0;
-            bottomReachedAt = 0;
+            viewportConfirmation = null;
+            nextReadStateScanAt = 0;
+            resetBottomTracking();
 
             if (frameId !== null) {
                 cancelAnimationFrame(frameId);
@@ -2998,10 +3223,11 @@
 
             const frameGapMs = Math.max(0, timestamp - lastFrameAt);
             const deltaSeconds = clamp(frameGapMs / 1000, 0, 0.08);
+            const activeFrameMs = document.hidden ? 0 : Math.min(frameGapMs, 250);
             lastFrameAt = timestamp;
             // 连续阅读计划只累计可见页面中的有效运行时间，暂停或后台节流时间不会被算入。
-            if (readingPlan && !document.hidden) {
-                readingPlanElapsedMs += Math.min(frameGapMs, 250);
+            if (readingPlan) {
+                readingPlanElapsedMs += activeFrameMs;
             }
             const readingPlanChanged = refreshReadingPlan(timestamp);
             if (timestamp >= nextSpeedVariationAt) {
@@ -3027,43 +3253,84 @@
             }
 
             if (heightGrew) {
-                bottomReachedAt = 0;
+                resetBottomTracking();
                 setState('loading', readingPlan ? `已识别 ${readingPlan.postCount} 层 · 正在衔接后续内容` : '');
             }
 
             if (before.remaining > CONFIG.bottomThreshold) {
-                bottomReachedAt = 0;
-                if (!heightGrew && state !== 'running') {
-                    setState('running', readingPlanSummary());
+                resetBottomTracking();
+                const confirmingReadState = updateViewportConfirmation(timestamp, activeFrameMs);
+                if (!running) {
+                    return;
                 }
 
-                // 低速或高刷新率下，单帧位移可能不足 1px；先累计后再提交整数位移。
-                // 高 DPI/页面缩放会把 1px 量化成不同的实际距离，因此按真实位移回补误差。
-                scrollRemainder += currentSpeed * deltaSeconds;
-                const scrollPixels = Math.trunc(scrollRemainder);
-                if (scrollPixels !== 0) {
-                    window.scrollBy(0, scrollPixels);
-                    scrollRemainder -= getScrollMetrics().top - before.top;
+                if (confirmingReadState) {
+                    currentSpeed = 0;
+                    scrollRemainder = 0;
+                } else {
+                    if (!heightGrew && state !== 'running') {
+                        setState('running', readingPlanSummary());
+                    }
+
+                    // 低速或高刷新率下，单帧位移可能不足 1px；先累计后再提交整数位移。
+                    // 高 DPI/页面缩放会把 1px 量化成不同的实际距离，因此按真实位移回补误差。
+                    scrollRemainder += currentSpeed * deltaSeconds;
+                    const scrollPixels = Math.trunc(scrollRemainder);
+                    if (scrollPixels !== 0) {
+                        window.scrollBy(0, scrollPixels);
+                        scrollRemainder -= getScrollMetrics().top - before.top;
+                    }
                 }
             } else {
+                viewportConfirmation = null;
                 scrollRemainder = 0;
-                if (!bottomReachedAt) {
-                    bottomReachedAt = timestamp;
+                bottomWaitElapsedMs += activeFrameMs;
+                bottomReportElapsedMs += activeFrameMs;
+
+                const visibleUnreadNumbers = visibleUnreadPostNumbers(false);
+                if (visibleUnreadNumbers.length === 0) {
+                    bottomReportQuietElapsedMs += activeFrameMs;
+                } else {
+                    bottomReportQuietElapsedMs = 0;
                 }
 
-                const waited = timestamp - bottomReachedAt;
-                const remainingWait = Math.max(0, CONFIG.bottomWaitMs - waited);
+                if (
+                    visibleUnreadNumbers.length > 0
+                    && !bottomReportRetryPulsed
+                    && bottomReportElapsedMs >= CONFIG.bottomReportRetryPulseMs
+                ) {
+                    bottomReportRetryPulsed = true;
+                    pulseNativeScroll();
+                }
+
+                const remainingWait = Math.max(0, CONFIG.bottomWaitMs - bottomWaitElapsedMs);
                 const remainingReadingTime = readingPlanRemainingMs();
-                if (remainingWait <= 0 && remainingReadingTime <= 0) {
+                const reportConfirmed = visibleUnreadNumbers.length === 0
+                    && bottomReportQuietElapsedMs >= CONFIG.bottomReportQuietMs;
+                const reportTimedOut = bottomReportElapsedMs >= CONFIG.bottomReportTimeoutMs;
+                const completionReady = remainingWait <= 0 && remainingReadingTime <= 0;
+                if (completionReady && reportConfirmed) {
                     stop('done');
                     return;
                 }
 
+                if (completionReady && reportTimedOut && visibleUnreadNumbers.length > 0) {
+                    requestPersistentUnreadRecovery(visibleUnreadNumbers);
+                    return;
+                }
+
+                const reportWaitingDetail = reportTimedOut
+                    ? `站点仍未确认 · ${formatPostNumbers(visibleUnreadNumbers)} · 计划结束后恢复`
+                    : `等待站点记录 · ${formatPostNumbers(visibleUnreadNumbers)} · 最多 ${Math.ceil((CONFIG.bottomReportTimeoutMs - bottomReportElapsedMs) / 1000)} 秒`;
                 setState(
                     'waiting',
-                    remainingReadingTime > 0
+                    visibleUnreadNumbers.length > 0
+                        ? reportWaitingDetail
+                        : remainingReadingTime > 0
                         ? readingPlanWaitingDetail()
-                        : `等待懒加载 · ${Math.ceil(remainingWait / 1000)} 秒`
+                        : remainingWait > 0
+                            ? `等待懒加载 · ${Math.ceil(remainingWait / 1000)} 秒`
+                            : '正在确认站点记录'
                 );
                 // 持续贴近底部，以便触发 Discourse 的懒加载观察器。
                 window.scrollTo(0, before.maximum);
@@ -3093,7 +3360,9 @@
             manualPauseReadyAt = activeSince + CONFIG.manualPauseGraceMs;
             lastFrameAt = activeSince;
             lastHeight = getScrollMetrics().height;
-            bottomReachedAt = 0;
+            resetBottomTracking();
+            viewportConfirmation = null;
+            nextReadStateScanAt = 0;
             refreshReadingPlan(activeSince, true);
             const initialMetrics = getScrollMetrics();
             const initialPlanMs = readingPlanRemainingMs();
@@ -3124,6 +3393,11 @@
             readingPlan = null;
             readingPlanElapsedMs = 0;
             nextPlanRefreshAt = 0;
+            viewportConfirmation = null;
+            nextReadStateScanAt = 0;
+            consecutiveReadStateTimeouts = 0;
+            lastReadStateTimeoutAt = 0;
+            attemptedReadPosts.clear();
             stop('idle');
             distance = 0;
             elapsedBeforeRun = 0;
@@ -3374,6 +3648,112 @@
         }
     }
 
+    const ReadRecovery = {
+        maxAgeMs: 5 * 60 * 1000,
+
+        load() {
+            try {
+                const value = JSON.parse(sessionStorage.getItem(APP.recoveryStorageKey) || 'null');
+                const requestedAt = Number(value?.requestedAt) || 0;
+                if (
+                    !value
+                    || !/^\d+$/.test(String(value.topicId || ''))
+                    || Date.now() - requestedAt > this.maxAgeMs
+                ) {
+                    this.clear();
+                    return null;
+                }
+
+                return {
+                    topicId: String(value.topicId),
+                    reloadCount: Math.max(0, Math.floor(Number(value.reloadCount) || 0)),
+                    requestedAt,
+                    resume: Boolean(value.resume),
+                    targetPostNumber: Math.max(0, Math.floor(Number(value.targetPostNumber) || 0))
+                };
+            } catch {
+                this.clear();
+                return null;
+            }
+        },
+
+        save(value) {
+            try {
+                sessionStorage.setItem(APP.recoveryStorageKey, JSON.stringify(value));
+                return true;
+            } catch (error) {
+                console.warn(`[${APP.name}] 阅读记录恢复状态保存失败。`, error);
+                return false;
+            }
+        },
+
+        clear() {
+            try {
+                sessionStorage.removeItem(APP.recoveryStorageKey);
+            } catch {
+                // 会话存储不可用时不影响基本阅读。
+            }
+        },
+
+        syncCurrentRoute() {
+            const recovery = this.load();
+            if (recovery && recovery.topicId !== topicIdFromUrl(window.location.href)) {
+                this.clear();
+                return null;
+            }
+            return recovery;
+        },
+
+        shouldResumeCurrent() {
+            return Boolean(this.syncCurrentRoute()?.resume);
+        },
+
+        markResumeStarted() {
+            const recovery = this.syncCurrentRoute();
+            if (!recovery?.resume) {
+                return;
+            }
+            recovery.resume = false;
+            this.save(recovery);
+        },
+
+        requestReload(numbers) {
+            const topic = normalizeTopicUrl(window.location.href);
+            if (!topic) {
+                return false;
+            }
+
+            const existing = this.load();
+            if (existing?.topicId === topic.id && existing.reloadCount >= 1) {
+                return false;
+            }
+
+            const targetPostNumber = Math.max(0, Math.floor(Number(numbers[0]) || 0));
+            const target = new URL(topic.url);
+            target.search = window.location.search;
+            if (targetPostNumber > 0) {
+                target.pathname = `${target.pathname.replace(/\/$/, '')}/${targetPostNumber}`;
+            }
+            const targetUrl = target.href;
+            const saved = this.save({
+                topicId: topic.id,
+                reloadCount: 1,
+                requestedAt: Date.now(),
+                resume: true,
+                targetPostNumber
+            });
+            if (!saved) {
+                return false;
+            }
+
+            window.setTimeout(() => {
+                // 仅重载当前话题的当前楼层，不新建标签页，也不绕过 Discourse 的原生阅读链路。
+                window.location.replace(targetUrl);
+            }, 1200);
+            return true;
+        }
+    };
+
     function createQueueManager() {
         let session = QueueStorage.load();
         let cooldownFrame = null;
@@ -3599,7 +3979,40 @@
     }
 
     const queueManager = createQueueManager();
-    handleScrollDone = () => queueManager.onTopicDone();
+    handleScrollDone = () => {
+        ReadRecovery.clear();
+        queueManager.onTopicDone();
+    };
+    handlePersistentUnread = (numbers) => {
+        if (ReadRecovery.requestReload(numbers)) {
+            scrollController.showState(
+                'recovering',
+                `连续蓝点未消失 · 正在重载 ${numbers[0] || '当前'} 层`
+            );
+            window.setTimeout(() => {
+                if (refs.shell.dataset.state !== 'recovering') {
+                    return;
+                }
+
+                ReadRecovery.clear();
+                const detail = '当前楼层重载未完成，已停下以避免循环';
+                if (queueManager.isActive()) {
+                    queueManager.stop(detail);
+                } else {
+                    scrollController.showState('paused', detail);
+                }
+            }, 8000);
+            return true;
+        }
+
+        const detail = '重载后阅读记录仍未确认，已停在当前帖，请检查网络后重试';
+        if (queueManager.isActive()) {
+            queueManager.stop(detail);
+        } else {
+            scrollController.showState('paused', detail);
+        }
+        return true;
+    };
 
     function waitForTopicContent(timeoutMs = 12000) {
         const selector = '.topic-post, [data-post-id], #topic-title, article';
@@ -3637,6 +4050,7 @@
         resumeAfterVisibilityPause = false;
         host.hidden = !supported;
         scrollController.resetForRoute();
+        ReadRecovery.syncCurrentRoute();
 
         if (!supported) {
             pendingVisibleAutoStart = false;
@@ -3656,7 +4070,9 @@
         }
 
         const shouldStartQueue = queueManager.shouldAutoStartCurrentTopic();
+        const shouldResumeRecovery = ReadRecovery.shouldResumeCurrent();
         const shouldStart = shouldStartQueue
+            || shouldResumeRecovery
             || (!queueManager.isActive() && settings.mode === 'auto');
         if (!shouldStart) {
             pendingVisibleAutoStart = false;
@@ -3685,10 +4101,17 @@
             return;
         }
 
+        if (shouldResumeRecovery) {
+            ReadRecovery.markResumeStarted();
+        }
         scrollController.start(shouldStartQueue ? createQueueReadingPlan() : null);
     }
 
     function handlePrimaryAction() {
+        if (refs.shell.dataset.state === 'recovering') {
+            return;
+        }
+
         if (isListRoute()) {
             if (settings.mode !== 'queue') {
                 scrollController.showState('idle', '当前模式需要先手动打开帖子');

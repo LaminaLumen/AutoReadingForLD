@@ -41,6 +41,9 @@ requireMatch(/^\/\/\s+@grant\s+none$/m, '脚本必须保持 @grant none');
 requireMatch(/^\/\/\s+@license\s+MIT$/m, '缺少 MIT 许可元数据');
 requireMatch(/^\/\/\s+@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/LaminaLumen\/Lanyue\/main\/Lanyue\.user\.js$/m, '下载地址不正确');
 requireMatch(/^\/\/\s+@updateURL\s+https:\/\/raw\.githubusercontent\.com\/LaminaLumen\/Lanyue\/main\/Lanyue\.user\.js$/m, '更新地址不正确');
+requireMatch(/\.read-state:not\(\.read\)/, '缺少 Discourse 未读楼层识别');
+requireMatch(/bottomReportTimeoutMs/, '缺少离帖前阅读记录确认闸门');
+requireMatch(/ReadRecovery\.requestReload/, '缺少连续未确认时的有界重载恢复');
 
 const metadataVersion = metadataValue('version');
 const runtimeVersion = source.match(/version:\s*'([^']+)'/)?.[1] || '';
@@ -51,6 +54,7 @@ if (!metadataVersion || metadataVersion !== runtimeVersion || metadataVersion !=
 rejectMatch(/^\/\/\s+@match\s+https:\/\/linux\.do\/\*$/m, '禁止使用覆盖全站的宽泛 @match');
 rejectMatch(/^\/\/\s+@(?:connect|require|resource)\b/m, '禁止声明跨域连接或远程资源权限');
 rejectMatch(/\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(/, '发现网络请求 API，请确认是否超出项目边界');
+rejectMatch(/\/topics\/timings/, '禁止脚本直接调用 Discourse 阅读上报接口');
 rejectMatch(/\bGM(?:\.|_)[A-Za-z]/, '发现 GM 特权 API，与 @grant none 约束不符');
 rejectMatch(/\b(?:eval|Function)\s*\(/, '禁止动态执行代码');
 rejectMatch(/localStorage\.clear\s*\(/, '禁止清空整个站点的 localStorage');
