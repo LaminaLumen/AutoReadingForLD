@@ -1,0 +1,15 @@
+{
+  "name": "auto-reading-for-ld",
+  "version": "2.0.0",
+  "private": true,
+  "description": "面向 LINUX DO 长帖的多模式自动阅读用户脚本",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "check": "node --check AutoReadingForLD.user.js && node scripts/check-userscript.mjs",
+    "preview": "node scripts/preview-server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

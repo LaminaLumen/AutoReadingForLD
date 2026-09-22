@@ -1,0 +1,11 @@
+node_modules/
+coverage/
+dist/
+output/
+design-qa.md
+.playwright-cli/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

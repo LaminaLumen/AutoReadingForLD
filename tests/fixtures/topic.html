@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AutoReadingForLD 视觉验证</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --page: #f5f4ef;
+            --surface: #fffefb;
+            --ink: #242a26;
+            --muted: #747b75;
+            --line: #dedfd9;
+            --accent: #2f6f59;
+        }
+
+        html.dark {
+            color-scheme: dark;
+            --page: #141815;
+            --surface: #1c221e;
+            --ink: #edf0e9;
+            --muted: #a1aaa3;
+            --line: #343d36;
+            --accent: #86b8a5;
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            color: var(--ink);
+            background: var(--page);
+            font-family: "Segoe UI", "PingFang SC", sans-serif;
+        }
+
+        header {
+            position: sticky;
+            top: 0;
+            z-index: 3;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 62px;
+            padding: 0 24px;
+            border-bottom: 1px solid var(--line);
+            background: color-mix(in srgb, var(--surface) 92%, transparent);
+            backdrop-filter: blur(16px);
+        }
+
+        header strong { letter-spacing: .08em; }
+        header span { color: var(--muted); font-size: 13px; }
+
+        main {
+            width: min(820px, calc(100% - 32px));
+            margin: 34px auto 120px;
+        }
+
+        article, .topic-list {
+            padding: clamp(24px, 5vw, 52px);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+            box-shadow: 0 18px 60px rgba(20, 30, 24, .06);
+        }
+
+        h1 { margin: 0 0 12px; font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(30px, 5vw, 48px); }
+        .meta { color: var(--muted); margin-bottom: 36px; }
+        p { margin: 0 0 1.45em; font-family: Georgia, "Noto Serif SC", serif; font-size: 18px; line-height: 1.9; }
+
+        .topic-list-item {
+            display: grid;
+            gap: 5px;
+            padding: 16px 0;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .topic-list-item:last-child { border-bottom: 0; }
+        .topic-list-item a { color: var(--ink); font-size: 17px; font-weight: 700; text-decoration: none; }
+        .topic-list-item small { color: var(--muted); }
+        .new-topic { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--accent); }
+    </style>
+</head>
+<body>
+    <header>
+        <strong>LINUX DO</strong>
+        <span>AutoReadingForLD 本地视觉验证页</span>
+    </header>
+    <main id="main"></main>
+    <script>
+        const params = new URLSearchParams(location.search);
+        if (params.get('theme') === 'dark') {
+            document.documentElement.classList.add('dark');
+        }
+
+        const main = document.getElementById('main');
+        const listRoute = /^\/(new|unread|unseen|latest)/.test(location.pathname);
+        if (listRoute) {
+            main.innerHTML = `
+                <section class="topic-list">
+                    <h1>新帖列表</h1>
+                    <p class="meta">用于验证连续阅读模式，不连接真实站点。</p>
+                    ${Array.from({ length: 12 }, (_, index) => `
+                        <div class="topic-list-item unseen-topic">
+                            <a class="title raw-topic-link" href="/t/topic/${1001 + index}">
+                                <span class="new-topic"></span>测试长帖 ${index + 1}：阅读节奏与排版
+                            </a>
+                            <small>${18 + index * 3} 条回复 · 刚刚更新</small>
+                        </div>
+                    `).join('')}
+                </section>
+            `;
+        } else {
+            const topicId = location.pathname.match(/(\d+)/)?.[1] || '1001';
+            main.innerHTML = `
+                <article class="topic-post" data-post-id="1">
+                    <h1>测试长帖 ${topicId}：让阅读保持自己的节奏</h1>
+                    <div class="meta">视觉与滚动行为验证 · 共 42 个段落</div>
+                    ${Array.from({ length: 42 }, (_, index) => `
+                        <p>这是用于本地验证的第 ${index + 1} 段内容。长帖阅读不应该被突兀的控件打断，稳定的滚动节奏、明确的状态反馈和克制的视觉层级，能够让注意力重新回到正文。</p>
+                    `).join('')}
+                </article>
+            `;
+        }
+    </script>
+    <script src="/AutoReadingForLD.user.js"></script>
+</body>
+</html>
