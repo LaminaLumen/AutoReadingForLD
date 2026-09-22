@@ -2,7 +2,7 @@
 // @name         AutoReadingForLD
 // @name:zh-CN   AutoReadingForLD - LINUX DO 沉浸阅读助手
 // @namespace    https://github.com/LaminaLumen/AutoReadingForLD
-// @version      2.0.1
+// @version      2.0.2
 // @description  为 LINUX DO 长帖提供自然节奏滚动、三种阅读模式、懒加载等待与沉浸式控制面板。
 // @author       pboy, LaminaLumen contributors
 // @license      MIT
@@ -26,7 +26,7 @@
 
     const APP = Object.freeze({
         name: 'AutoReadingForLD',
-        version: '2.0.1',
+        version: '2.0.2',
         rootId: 'auto-reading-for-ld-root',
         storageKey: 'auto-reading-for-ld:settings:v2',
         queueStorageKey: 'auto-reading-for-ld:queue:v1',
@@ -36,7 +36,7 @@
     const CONFIG = Object.freeze({
         // 原版最低档为 0.5 px/frame，按常见的 60Hz 刷新率折算约为 30 px/s。
         defaultSpeed: 30,
-        settingsRevision: 1,
+        settingsRevision: 2,
         minSpeed: 12,
         maxSpeed: 160,
         speedSliderStep: 2,
@@ -52,6 +52,7 @@
         queueMaxItems: 20,
         queueDefaultItems: 8,
         queueMaxAgeMs: 6 * 60 * 60 * 1000,
+        manualPauseGraceMs: 900,
         uiRefreshMs: 120,
         edgePadding: 12,
         snapThreshold: 24
@@ -150,8 +151,8 @@
                 mode: 'single',
                 queueLimit: CONFIG.queueDefaultItems,
                 minimized: true,
-                autoPauseOnHidden: true,
-                pauseOnManualInput: true,
+                autoPauseOnHidden: false,
+                pauseOnManualInput: false,
                 position: null
             };
         },
@@ -215,18 +216,33 @@
                 const savedText = localStorage.getItem(APP.storageKey);
                 if (savedText) {
                     const saved = JSON.parse(savedText);
+                    const savedRevision = Number.isInteger(saved?.settingsRevision)
+                        ? saved.settingsRevision
+                        : 0;
                     const needsDefaultSpeedMigration = (
-                        (!Number.isInteger(saved?.settingsRevision)
-                            || saved.settingsRevision < CONFIG.settingsRevision)
+                        savedRevision < 1
                         && saved?.speed === 52
+                    );
+                    const usesOldProtectionDefaults = (
+                        savedRevision < 2
+                        && saved?.autoPauseOnHidden === true
+                        && saved?.pauseOnManualInput === true
                     );
                     const normalized = this.normalize({
                         ...saved,
-                        speed: needsDefaultSpeedMigration ? CONFIG.defaultSpeed : saved?.speed
+                        speed: needsDefaultSpeedMigration ? CONFIG.defaultSpeed : saved?.speed,
+                        // 2.0.0/2.0.1 曾把两项保护同时默认开启，导致自动阅读频繁中断。
+                        // 仅迁移仍保持整组旧默认值的配置；用户单独调整过任一项时保留其选择。
+                        autoPauseOnHidden: usesOldProtectionDefaults ? false : saved?.autoPauseOnHidden,
+                        pauseOnManualInput: usesOldProtectionDefaults ? false : saved?.pauseOnManualInput
                     });
 
                     // 2.0.0 的 52 px/s 是旧默认值；仅迁移未标记的旧配置，用户之后手动选择 52 不受影响。
-                    if (needsDefaultSpeedMigration || saved?.settingsRevision !== CONFIG.settingsRevision) {
+                    if (
+                        needsDefaultSpeedMigration
+                        || usesOldProtectionDefaults
+                        || savedRevision !== CONFIG.settingsRevision
+                    ) {
                         this.save(normalized);
                     }
 
@@ -1498,14 +1514,14 @@
                                     <span class="summary-icon">${renderIcon('shieldCheck')}</span>
                                     <span>阅读保护</span>
                                 </span>
-                                <small>后台与手动操作</small>
+                                <small>按需开启</small>
                                 ${renderIcon('caretDown', 'icon fold-caret')}
                             </summary>
                             <div class="preferences">
                                 <label class="preference">
                                     <span class="preference__copy">
                                         <span class="preference__title">切到后台时暂停</span>
-                                        <span class="preference__detail">避免后台标签页继续滚动</span>
+                                        <span class="preference__detail">返回当前页面后自动继续</span>
                                     </span>
                                     <input type="checkbox" data-setting="autoPauseOnHidden" ${settings.autoPauseOnHidden ? 'checked' : ''}>
                                 </label>
@@ -1513,7 +1529,7 @@
                                 <label class="preference">
                                     <span class="preference__copy">
                                         <span class="preference__title">手动操作时暂停</span>
-                                        <span class="preference__detail">滚轮、触摸或翻页键触发</span>
+                                        <span class="preference__detail">滚轮、触摸或翻页键接管页面</span>
                                     </span>
                                     <input type="checkbox" data-setting="pauseOnManualInput" ${settings.pauseOnManualInput ? 'checked' : ''}>
                                 </label>
@@ -2045,6 +2061,7 @@
         let scrollRemainder = 0;
         let elapsedBeforeRun = 0;
         let activeSince = 0;
+        let manualPauseReadyAt = 0;
         let lastUiRefreshAt = 0;
         let detailOverride = '';
 
@@ -2113,6 +2130,7 @@
 
             running = false;
             activeSince = 0;
+            manualPauseReadyAt = 0;
             currentSpeed = 0;
             scrollRemainder = 0;
             bottomReachedAt = 0;
@@ -2204,6 +2222,8 @@
 
             running = true;
             activeSince = performance.now();
+            // 点击开始前残留的触控板惯性滚轮事件不应立刻把刚启动的阅读再次暂停。
+            manualPauseReadyAt = activeSince + CONFIG.manualPauseGraceMs;
             lastFrameAt = activeSince;
             lastHeight = getScrollMetrics().height;
             bottomReachedAt = 0;
@@ -2242,6 +2262,14 @@
                     stop('paused', detail);
                 }
             },
+            pauseForManualInput(detail = '检测到手动操作') {
+                if (!running || performance.now() < manualPauseReadyAt) {
+                    return false;
+                }
+
+                stop('paused', detail);
+                return true;
+            },
             resetForRoute,
             showState(nextState, detail = '') {
                 setState(nextState, detail);
@@ -2264,16 +2292,28 @@
                 return null;
             }
 
-            const match = url.pathname.match(/^\/(?:t|n)\/(?:[^/]+\/)?(\d+)/);
-            if (!match) {
+            const segments = url.pathname.split('/').filter(Boolean);
+            if (!['t', 'n'].includes(segments[0])) {
+                return null;
+            }
+
+            const firstPartIsId = /^\d+$/.test(segments[1] || '');
+            const id = firstPartIsId
+                ? segments[1]
+                : /^\d+$/.test(segments[2] || '')
+                    ? segments[2]
+                    : '';
+            if (!id) {
                 return null;
             }
 
             // 队列始终从话题入口开始，不继承楼层、查询参数或锚点。
-            url.pathname = match[0];
+            url.pathname = firstPartIsId
+                ? `/${segments[0]}/${id}`
+                : `/${segments[0]}/${segments[1]}/${id}`;
             url.search = '';
             url.hash = '';
-            return { id: match[1], url: url.href };
+            return { id, kind: segments[0], url: url.href };
         } catch {
             return null;
         }
@@ -2294,6 +2334,25 @@
             return url.href;
         } catch {
             return '';
+        }
+    }
+
+    function routeIdentity(value = window.location.href) {
+        const topic = normalizeTopicUrl(value);
+        if (topic) {
+            return `topic:${topic.kind}:${topic.id}`;
+        }
+
+        try {
+            const url = new URL(value, window.location.origin);
+            const listMatch = url.pathname.match(/^\/(new|unread|unseen|latest)(?:\/|$)/);
+            if (url.origin === window.location.origin && listMatch) {
+                return `list:${listMatch[1]}`;
+            }
+
+            return `other:${url.origin}${url.pathname}`;
+        } catch {
+            return 'other:invalid';
         }
     }
 
@@ -2412,6 +2471,29 @@
         }
     };
 
+    function navigateWithinSite(value) {
+        try {
+            const url = new URL(value, window.location.origin);
+            if (url.origin !== window.location.origin) {
+                return false;
+            }
+
+            // 通过普通同源链接进入下一页，让 Discourse 的路由层有机会先刷新原生阅读计时。
+            // 若当前版本未接管链接，浏览器仍会按默认行为完成同标签页导航。
+            const anchor = document.createElement('a');
+            anchor.href = url.href;
+            anchor.hidden = true;
+            anchor.tabIndex = -1;
+            anchor.setAttribute('aria-hidden', 'true');
+            document.body.append(anchor);
+            anchor.click();
+            anchor.remove();
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     function createQueueManager() {
         let session = QueueStorage.load();
         let cooldownFrame = null;
@@ -2455,7 +2537,9 @@
             session.phase = 'reading';
             session.cooldownRemainingMs = CONFIG.queueCooldownMs;
             save();
-            window.location.assign(item.url);
+            if (!navigateWithinSite(item.url)) {
+                stop('连续阅读已停止：下一篇地址无效');
+            }
         }
 
         function complete() {
@@ -2468,7 +2552,7 @@
 
             if (isTopicRoute() && returnUrl) {
                 navigationTimer = window.setTimeout(() => {
-                    window.location.assign(returnUrl);
+                    navigateWithinSite(returnUrl);
                 }, 1600);
             }
         }
@@ -2666,9 +2750,11 @@
 
     let routeActivation = 0;
     let pendingVisibleAutoStart = false;
+    let resumeAfterVisibilityPause = false;
     async function activateCurrentRoute() {
         const activation = ++routeActivation;
         const supported = isSupportedRoute();
+        resumeAfterVisibilityPause = false;
         host.hidden = !supported;
         scrollController.resetForRoute();
 
@@ -2796,11 +2882,16 @@
     }
 
     function pauseForManualInput(event) {
-        if (!settings.pauseOnManualInput || !scrollController.isRunning() || eventCameFromPanel(event)) {
+        if (
+            !event.isTrusted
+            || !settings.pauseOnManualInput
+            || !scrollController.isRunning()
+            || eventCameFromPanel(event)
+        ) {
             return;
         }
 
-        scrollController.pause('检测到手动操作');
+        scrollController.pauseForManualInput('检测到手动操作');
     }
 
     window.addEventListener('wheel', pauseForManualInput, { capture: true, passive: true });
@@ -2836,14 +2927,18 @@
         }
 
         const manualScrollKeys = new Set(['Space', 'PageDown', 'PageUp', 'Home', 'End', 'ArrowDown', 'ArrowUp']);
-        if (settings.pauseOnManualInput && manualScrollKeys.has(event.code)) {
-            scrollController.pause('检测到手动翻页');
+        if (event.isTrusted && settings.pauseOnManualInput && manualScrollKeys.has(event.code)) {
+            scrollController.pauseForManualInput('检测到手动翻页');
         }
     }, true);
 
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden && settings.autoPauseOnHidden) {
+        if (document.hidden && settings.autoPauseOnHidden && scrollController.isRunning()) {
+            resumeAfterVisibilityPause = true;
             scrollController.pause('页面进入后台，已自动暂停');
+        } else if (!document.hidden && resumeAfterVisibilityPause) {
+            resumeAfterVisibilityPause = false;
+            scrollController.start();
         } else if (!document.hidden && pendingVisibleAutoStart) {
             pendingVisibleAutoStart = false;
             activateCurrentRoute();
@@ -2868,12 +2963,20 @@
     }, { passive: true });
 
     let lastUrl = window.location.href;
+    let lastRouteIdentity = routeIdentity(lastUrl);
     function handleLocationChange() {
         if (window.location.href === lastUrl) {
             return;
         }
 
         lastUrl = window.location.href;
+        const nextRouteIdentity = routeIdentity(lastUrl);
+        if (nextRouteIdentity === lastRouteIdentity) {
+            // Discourse 会随阅读进度更新当前楼层号；这仍是同一帖子，不能重置滚动状态。
+            return;
+        }
+
+        lastRouteIdentity = nextRouteIdentity;
         activateCurrentRoute();
         if (isSupportedRoute()) {
             requestAnimationFrame(() => dragController.clampToViewport());
