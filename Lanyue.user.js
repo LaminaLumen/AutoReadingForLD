@@ -2,7 +2,7 @@
 // @name         澜阅
 // @name:zh-CN   澜阅 - LINUX DO 沉浸阅读器
 // @namespace    https://github.com/LaminaLumen/Lanyue
-// @version      2.1.1
+// @version      2.1.2
 // @description  让 LINUX DO 长帖按自然节奏缓缓展开，支持当前帖、自动帖与连续阅读。
 // @author       pboy, 澜阅 contributors
 // @license      MIT
@@ -26,7 +26,7 @@
 
     const APP = Object.freeze({
         name: '澜阅',
-        version: '2.1.1',
+        version: '2.1.2',
         rootId: 'lanyue-reader-root',
         storageKey: 'lanyue:settings:v1',
         queueStorageKey: 'lanyue:queue:v1',
@@ -36,7 +36,7 @@
     const CONFIG = Object.freeze({
         // 原版最低档为 0.5 px/frame，按常见的 60Hz 刷新率折算约为 30 px/s。
         defaultSpeed: 30,
-        settingsRevision: 1,
+        settingsRevision: 2,
         minSpeed: 12,
         maxSpeed: 160,
         speedSliderStep: 2,
@@ -47,11 +47,20 @@
         speedVariationIntervalMaxMs: 6200,
         bottomThreshold: 120,
         bottomWaitMs: 6000,
+        postLoadTimeoutMs: 20000,
+        readAheadScanMs: 350,
+        readAheadScreens: 4,
         queueCooldownMs: 8000,
         queueMinItems: 1,
         queueMaxItems: 20,
-        queueDefaultItems: 8,
-        queueMaxAgeMs: 6 * 60 * 60 * 1000,
+        queueDefaultItems: 10,
+        queueSessionMinItems: 10,
+        queueSessionMaxItems: 200,
+        queueSessionDefaultItems: 100,
+        queueRefillThreshold: 2,
+        queueRefillMaxLoads: 24,
+        queueListLoadWaitMs: 5000,
+        queueMaxAgeMs: 24 * 60 * 60 * 1000,
         queueReadBaseMs: 15000,
         queueReadPerPostMs: 3200,
         queueReadMinMs: 30000,
@@ -60,8 +69,8 @@
         readStateScanMs: 180,
         readConfirmMinMs: 2800,
         readConfirmMaxMs: 4200,
-        readConfirmBandTopRatio: 0.18,
-        readConfirmBandBottomRatio: 0.82,
+        readConfirmBandTopRatio: 0.08,
+        readConfirmBandBottomRatio: 0.32,
         readConfirmMinVisiblePx: 56,
         readConfirmRetryPulseMs: 1600,
         readConfirmReloadAfterBatches: 2,
@@ -181,7 +190,18 @@
         return values.length > 0 ? Math.max(...values) : 0;
     }
 
+    const initialPageTopicId = topicIdFromUrl(window.location.href);
+    let cachedPreloadedPostCount = null;
+
     function preloadedTopicPostCount() {
+        // 服务端预载数据属于首次打开的话题；站内切帖后继续复用会把上一篇的楼层数带入计划。
+        if (!initialPageTopicId || topicIdFromUrl(window.location.href) !== initialPageTopicId) {
+            return 0;
+        }
+        if (cachedPreloadedPostCount !== null) {
+            return cachedPreloadedPostCount;
+        }
+
         const element = document.querySelector('#data-preloaded');
         if (!element) {
             return 0;
@@ -239,6 +259,7 @@
             }
         }
 
+        cachedPreloadedPostCount = maximum;
         return maximum;
     }
 
@@ -313,6 +334,7 @@
                 speed: CONFIG.defaultSpeed,
                 mode: 'single',
                 queueLimit: CONFIG.queueDefaultItems,
+                queueSessionLimit: CONFIG.queueSessionDefaultItems,
                 minimized: true,
                 autoPauseOnHidden: false,
                 pauseOnManualInput: false,
@@ -322,6 +344,8 @@
 
         normalize(value) {
             const defaults = this.defaults();
+            const migrateDefaultQueueSize = Number(value?.settingsRevision) < 2
+                && Number(value?.queueLimit) === 8;
             const rawPosition = value?.position;
             const position = rawPosition
                 && isFiniteNumber(rawPosition.left)
@@ -338,9 +362,20 @@
                 ),
                 mode: READING_MODES.some((mode) => mode.key === value?.mode) ? value.mode : defaults.mode,
                 queueLimit: clamp(
-                    Number.isFinite(Number(value?.queueLimit)) ? Math.round(Number(value.queueLimit)) : defaults.queueLimit,
+                    migrateDefaultQueueSize
+                        ? defaults.queueLimit
+                        : Number.isFinite(Number(value?.queueLimit))
+                            ? Math.round(Number(value.queueLimit))
+                            : defaults.queueLimit,
                     CONFIG.queueMinItems,
                     CONFIG.queueMaxItems
+                ),
+                queueSessionLimit: clamp(
+                    Number.isFinite(Number(value?.queueSessionLimit))
+                        ? Math.round(Number(value.queueSessionLimit) / 10) * 10
+                        : defaults.queueSessionLimit,
+                    CONFIG.queueSessionMinItems,
+                    CONFIG.queueSessionMaxItems
                 ),
                 minimized: typeof value?.minimized === 'boolean' ? value.minimized : defaults.minimized,
                 autoPauseOnHidden: typeof value?.autoPauseOnHidden === 'boolean'
@@ -1747,8 +1782,8 @@
                             <strong class="hero__title" id="reading-state-title" data-role="state-title">准备阅读</strong>
                             <span class="hero__detail" data-role="state-detail">选择模式，开始后自动向下滚动</span>
                             <div class="queue-summary" data-role="queue-summary" hidden>
-                                <strong><span data-role="queue-summary-count">${settings.queueLimit}</span> 篇</strong>
-                                <span>· 每篇间隔 ${CONFIG.queueCooldownMs / 1000} 秒</span>
+                                <strong>保持 <span data-role="queue-summary-count">${settings.queueLimit}</span> 篇</strong>
+                                <span>· 本轮最多 <span data-role="queue-summary-limit">${settings.queueSessionLimit}</span> 篇</span>
                             </div>
                             <button class="main-control" type="button" data-action="toggle" aria-label="开始阅读">
                                 ${renderIcon('play', 'icon control-icon', 'data-icon-state="play"')}
@@ -1798,7 +1833,7 @@
 
                                 <div class="queue-options" data-role="queue-options" hidden>
                                     <div class="queue-control-row">
-                                        <span>连续篇数</span>
+                                        <span>队列容量</span>
                                         <input
                                             class="queue-limit"
                                             data-role="queue-limit"
@@ -1807,12 +1842,26 @@
                                             max="${CONFIG.queueMaxItems}"
                                             step="1"
                                             value="${settings.queueLimit}"
-                                            aria-label="连续阅读篇数上限"
+                                            aria-label="连续阅读队列容量"
                                         >
                                         <strong class="queue-count" data-role="queue-count">${settings.queueLimit} 篇</strong>
                                     </div>
+                                    <div class="queue-control-row">
+                                        <span>本轮上限</span>
+                                        <input
+                                            class="queue-limit"
+                                            data-role="queue-session-limit"
+                                            type="range"
+                                            min="${CONFIG.queueSessionMinItems}"
+                                            max="${CONFIG.queueSessionMaxItems}"
+                                            step="10"
+                                            value="${settings.queueSessionLimit}"
+                                            aria-label="本轮连续阅读总篇数上限"
+                                        >
+                                        <strong class="queue-count" data-role="queue-session-count">${settings.queueSessionLimit} 篇</strong>
+                                    </div>
                                     <div class="queue-note">
-                                        <span>按列表顺序读取，每篇完成后前台冷却</span>
+                                        <span data-role="queue-note">读完自动补队列 · 前台间隔</span>
                                         <strong>${CONFIG.queueCooldownMs / 1000} 秒</strong>
                                     </div>
                                     <button class="queue-stop" type="button" data-action="stop-queue" data-role="queue-stop" hidden>
@@ -1930,9 +1979,13 @@
         speedValue: shadow.querySelector('[data-role="speed-value"]'),
         queueSummary: shadow.querySelector('[data-role="queue-summary"]'),
         queueSummaryCount: shadow.querySelector('[data-role="queue-summary-count"]'),
+        queueSummaryLimit: shadow.querySelector('[data-role="queue-summary-limit"]'),
         queueOptions: shadow.querySelector('[data-role="queue-options"]'),
         queueLimit: shadow.querySelector('[data-role="queue-limit"]'),
         queueCount: shadow.querySelector('[data-role="queue-count"]'),
+        queueSessionLimit: shadow.querySelector('[data-role="queue-session-limit"]'),
+        queueSessionCount: shadow.querySelector('[data-role="queue-session-count"]'),
+        queueNote: shadow.querySelector('[data-role="queue-note"]'),
         queueStop: shadow.querySelector('[data-role="queue-stop"]'),
         progressValue: shadow.querySelector('[data-role="progress-value"]'),
         timeValue: shadow.querySelector('[data-role="time-value"]'),
@@ -2505,7 +2558,7 @@
             case 'recovering':
                 return '重载当前楼层';
             case 'queue':
-                return `${settings.queueLimit} 篇队列`;
+                return queueUiActive ? '持续补帖' : `保持 ${settings.queueLimit} 篇`;
             case 'cooldown':
                 return '即将下一篇';
             case 'paused':
@@ -2647,7 +2700,9 @@
         settings.queueLimit = nextLimit;
         refs.queueLimit.value = String(nextLimit);
         refs.queueCount.textContent = `${nextLimit} 篇`;
-        refs.queueSummaryCount.textContent = String(nextLimit);
+        if (!queueUiActive) {
+            refs.queueSummaryCount.textContent = String(nextLimit);
+        }
         renderDockState();
 
         if (persist) {
@@ -2655,10 +2710,33 @@
         }
     }
 
+    function setQueueSessionLimit(limit, persist = true) {
+        const nextLimit = clamp(
+            Math.round((Number(limit) || CONFIG.queueSessionDefaultItems) / 10) * 10,
+            CONFIG.queueSessionMinItems,
+            CONFIG.queueSessionMaxItems
+        );
+        settings.queueSessionLimit = nextLimit;
+        refs.queueSessionLimit.value = String(nextLimit);
+        refs.queueSessionCount.textContent = `${nextLimit} 篇`;
+        if (!queueUiActive) {
+            refs.queueSummaryLimit.textContent = String(nextLimit);
+        }
+
+        if (persist) {
+            StorageManager.save(settings);
+        }
+    }
+
     let queueUiActive = false;
-    function setQueueActiveUi(active) {
+    function setQueueActiveUi(active, capacity = settings.queueLimit, totalLimit = settings.queueSessionLimit) {
         queueUiActive = Boolean(active);
         refs.queueStop.hidden = !queueUiActive;
+        refs.queueSummaryCount.textContent = String(queueUiActive ? capacity : settings.queueLimit);
+        refs.queueSummaryLimit.textContent = String(queueUiActive ? totalLimit : settings.queueSessionLimit);
+        refs.queueNote.textContent = queueUiActive
+            ? '设置变更下轮生效 · 前台间隔'
+            : '读完自动补队列 · 前台间隔';
         renderDockState();
     }
 
@@ -2848,6 +2926,28 @@
     let handleScrollDone = () => {};
     let handlePersistentUnread = () => false;
 
+    function nativePostStreamTail() {
+        const stream = document.querySelector('.post-stream');
+        if (!stream) {
+            return { sentinel: null, complete: false, lastPostNumber: 0 };
+        }
+
+        let lastPost = stream.lastElementChild;
+        while (lastPost && !lastPost.hasAttribute('data-post-number')) {
+            lastPost = lastPost.previousElementSibling;
+        }
+        let sentinel = lastPost?.nextElementSibling || null;
+        while (sentinel && !sentinel.matches('.load-more-sentinel')) {
+            sentinel = sentinel.nextElementSibling;
+        }
+
+        return {
+            sentinel,
+            complete: Boolean(stream.querySelector(':scope > .post-stream__bottom-boundary')),
+            lastPostNumber: Math.max(0, Number(lastPost?.getAttribute('data-post-number')) || 0)
+        };
+    }
+
     function createScrollController() {
         let state = 'idle';
         let running = false;
@@ -2873,6 +2973,14 @@
         let nextPlanRefreshAt = 0;
         let viewportConfirmation = null;
         let nextReadStateScanAt = 0;
+        let nextReadAheadScanAt = 0;
+        let readAheadSentinel = null;
+        let readAheadOriginalTranslate = '';
+        let readAheadOriginalPriority = '';
+        let readAheadShift = 0;
+        let streamTail = { sentinel: null, complete: false, lastPostNumber: 0 };
+        let streamStallElapsedMs = 0;
+        let lastStreamPostNumber = 0;
         let consecutiveReadStateTimeouts = 0;
         let lastReadStateTimeoutAt = 0;
         const attemptedReadPosts = new Set();
@@ -2895,6 +3003,60 @@
             bottomReportElapsedMs = 0;
             bottomReportQuietElapsedMs = 0;
             bottomReportRetryPulsed = false;
+        }
+
+        function restoreReadAhead() {
+            if (readAheadSentinel?.isConnected) {
+                if (readAheadOriginalTranslate) {
+                    readAheadSentinel.style.setProperty(
+                        'translate', readAheadOriginalTranslate, readAheadOriginalPriority
+                    );
+                } else {
+                    readAheadSentinel.style.removeProperty('translate');
+                }
+            }
+            readAheadSentinel = null;
+            readAheadOriginalTranslate = '';
+            readAheadOriginalPriority = '';
+            readAheadShift = 0;
+        }
+
+        function refreshReadAhead(timestamp, force = false) {
+            if (!force && timestamp < nextReadAheadScanAt && (!streamTail.sentinel || streamTail.sentinel.isConnected)) {
+                return streamTail;
+            }
+            nextReadAheadScanAt = timestamp + CONFIG.readAheadScanMs;
+            streamTail = nativePostStreamTail();
+            if (streamTail.sentinel !== readAheadSentinel) {
+                restoreReadAhead();
+                if (streamTail.sentinel) {
+                    readAheadSentinel = streamTail.sentinel;
+                    readAheadOriginalTranslate = readAheadSentinel.style.getPropertyValue('translate');
+                    readAheadOriginalPriority = readAheadSentinel.style.getPropertyPriority('translate');
+                }
+            }
+
+            if (!readAheadSentinel) {
+                return streamTail;
+            }
+
+            const viewport = Math.max(window.innerHeight, 1);
+            const naturalTop = readAheadSentinel.getBoundingClientRect().top + readAheadShift;
+            const lookahead = Math.min(viewport * CONFIG.readAheadScreens, Math.max(viewport * 2, settings.speed * 24));
+            // 只移动不可见的原生加载哨兵，不改正文布局或当前滚动位置。
+            // 原生 IntersectionObserver 会在读者抵达楼层末端前请求下一批。
+            const shift = Math.round(clamp(naturalTop - viewport * 0.78, 0, lookahead));
+            if (Math.abs(shift - readAheadShift) >= 8) {
+                readAheadShift = shift;
+                readAheadSentinel.style.setProperty('translate', `0 -${shift}px`);
+            }
+            return streamTail;
+        }
+
+        function distanceToNativeStreamEnd() {
+            return readAheadSentinel?.isConnected
+                ? readAheadSentinel.getBoundingClientRect().top + readAheadShift - window.innerHeight * 0.78
+                : Number.POSITIVE_INFINITY;
         }
 
         function postNumberForReadState(indicator) {
@@ -2933,6 +3095,9 @@
                 }
 
                 const rect = postElement.getBoundingClientRect();
+                if (readingBand && rect.bottom > bandBottom) {
+                    return;
+                }
                 const overlap = Math.min(rect.bottom, bandBottom) - Math.max(rect.top, bandTop);
                 const requiredOverlap = readingBand
                     ? Math.min(CONFIG.readConfirmMinVisiblePx, Math.max(18, rect.height * 0.2))
@@ -3196,6 +3361,10 @@
             scrollRemainder = 0;
             viewportConfirmation = null;
             nextReadStateScanAt = 0;
+            nextReadAheadScanAt = 0;
+            restoreReadAhead();
+            streamTail = { sentinel: null, complete: false, lastPostNumber: 0 };
+            streamStallElapsedMs = 0;
             resetBottomTracking();
 
             if (frameId !== null) {
@@ -3237,11 +3406,17 @@
             const before = getScrollMetrics();
             const heightGrew = before.height > lastHeight + 2;
             lastHeight = before.height;
+            const tail = refreshReadAhead(timestamp);
+            if (heightGrew || tail.lastPostNumber > lastStreamPostNumber) {
+                streamStallElapsedMs = 0;
+            }
+            lastStreamPostNumber = tail.lastPostNumber;
 
-            // 用户设定值仍是期望平均速度；连续读只在可能过早读完时降低上限，不会把慢速强行加快。
+            // 只有原生正文流确认已加载到末楼，页面剩余高度才可用于整篇限速。
+            // 长帖尚有成千上万楼未加载时，用当前十几楼的高度摊总时长会把高速档压成爬行。
             const requestedSpeed = settings.speed * speedMultiplier;
             const remainingPlanMs = readingPlanRemainingMs();
-            const paceLimit = readingPlan && remainingPlanMs > 0
+            const paceLimit = readingPlan && tail.complete && remainingPlanMs > 0
                 ? Math.max(1, before.remaining / Math.max(remainingPlanMs / 1000, 0.001))
                 : Number.POSITIVE_INFINITY;
             const targetSpeed = Math.min(requestedSpeed, paceLimit);
@@ -3257,8 +3432,26 @@
                 setState('loading', readingPlan ? `已识别 ${readingPlan.postCount} 层 · 正在衔接后续内容` : '');
             }
 
-            if (before.remaining > CONFIG.bottomThreshold) {
+            if (tail.sentinel?.isConnected && distanceToNativeStreamEnd() <= 0) {
                 resetBottomTracking();
+                const confirmingReadState = updateViewportConfirmation(timestamp, activeFrameMs);
+                if (!running) {
+                    return;
+                }
+
+                currentSpeed = 0;
+                scrollRemainder = 0;
+                if (!confirmingReadState) {
+                    streamStallElapsedMs += activeFrameMs;
+                    if (streamStallElapsedMs >= CONFIG.postLoadTimeoutMs) {
+                        stop('paused', '后续楼层加载超时，请检查网络后继续');
+                        return;
+                    }
+                    setState('loading', `站点正在加载后续楼层 · 已到 ${tail.lastPostNumber} 层`);
+                }
+            } else if (before.remaining > CONFIG.bottomThreshold) {
+                resetBottomTracking();
+                streamStallElapsedMs = 0;
                 const confirmingReadState = updateViewportConfirmation(timestamp, activeFrameMs);
                 if (!running) {
                     return;
@@ -3282,6 +3475,7 @@
                     }
                 }
             } else {
+                streamStallElapsedMs = 0;
                 viewportConfirmation = null;
                 scrollRemainder = 0;
                 bottomWaitElapsedMs += activeFrameMs;
@@ -3363,10 +3557,14 @@
             resetBottomTracking();
             viewportConfirmation = null;
             nextReadStateScanAt = 0;
+            nextReadAheadScanAt = 0;
+            streamStallElapsedMs = 0;
+            lastStreamPostNumber = 0;
             refreshReadingPlan(activeSince, true);
+            refreshReadAhead(activeSince, true);
             const initialMetrics = getScrollMetrics();
             const initialPlanMs = readingPlanRemainingMs();
-            const initialPaceLimit = readingPlan && initialPlanMs > 0
+            const initialPaceLimit = readingPlan && streamTail.complete && initialPlanMs > 0
                 ? Math.max(1, initialMetrics.remaining / Math.max(initialPlanMs / 1000, 0.001))
                 : Number.POSITIVE_INFINITY;
             currentSpeed = Math.min(
@@ -3395,6 +3593,9 @@
             nextPlanRefreshAt = 0;
             viewportConfirmation = null;
             nextReadStateScanAt = 0;
+            nextReadAheadScanAt = 0;
+            streamStallElapsedMs = 0;
+            lastStreamPostNumber = 0;
             consecutiveReadStateTimeouts = 0;
             lastReadStateTimeoutAt = 0;
             attemptedReadPosts.clear();
@@ -3510,23 +3711,23 @@
         }
     }
 
-    function collectTopicsFromList(limit) {
+    function collectTopicsFromList(limit, excludedIds = new Set()) {
         const topics = [];
-        const seen = new Set();
-        const rows = document.querySelectorAll('tr.topic-list-item, .topic-list-item');
-        const requireUnreadMarker = /^\/(?:latest|unseen)(?:\/|$)/.test(window.location.pathname);
+        const seen = new Set(excludedIds);
+        const rows = document.querySelectorAll('.topic-list-item, .latest-topic-list-item');
 
         for (const row of rows) {
             if (topics.length >= limit) {
                 break;
             }
 
-            if (requireUnreadMarker) {
-                const isUnread = row.matches('.unseen-topic, .visited:not(.read)')
-                    || Boolean(row.querySelector('.unread-posts, .new-topic, .read-state:not(.read), .badge-notification.new-posts'));
-                if (!isUnread) {
-                    continue;
-                }
+            // Discourse 的 visited 表示话题已打开过，即使后来又有新回复也不作为“新帖”入队。
+            // 四种列表都要求存在站点自己的未看/未读标记，不能仅凭列表入口判断整行未读。
+            const isVisited = row.matches('.visited, .read');
+            const hasUnreadMarker = row.matches('.unseen-topic, .unread-posts')
+                || Boolean(row.querySelector('.badge-notification.new-topic, .badge-notification.unread-posts, .new-topic, .unread-posts'));
+            if (isVisited || !hasUnreadMarker) {
+                continue;
             }
 
             const anchor = row.querySelector('a.title, a.raw-topic-link, a[data-topic-id]');
@@ -3558,6 +3759,8 @@
                 index: 0,
                 phase: 'idle',
                 sourceUrl: '',
+                capacity: CONFIG.queueDefaultItems,
+                totalLimit: CONFIG.queueSessionDefaultItems,
                 startedAt: 0,
                 updatedAt: 0,
                 cooldownRemainingMs: CONFIG.queueCooldownMs
@@ -3566,10 +3769,15 @@
 
         normalize(raw) {
             const empty = this.empty();
+            const seen = new Set();
             const items = Array.isArray(raw?.items)
                 ? raw.items
                     .map((item) => {
                         const normalizedTopic = item && normalizeTopicUrl(item.url);
+                        if (!normalizedTopic || seen.has(normalizedTopic.id)) {
+                            return null;
+                        }
+                        seen.add(normalizedTopic.id);
                         return normalizedTopic
                             ? {
                                 id: normalizedTopic.id,
@@ -3579,21 +3787,38 @@
                             : null;
                     })
                     .filter(Boolean)
-                    .slice(0, CONFIG.queueMaxItems)
+                    .slice(0, CONFIG.queueSessionMaxItems)
                 : [];
             const updatedAt = Number(raw?.updatedAt) || 0;
             const stale = !updatedAt || Date.now() - updatedAt > CONFIG.queueMaxAgeMs;
+            const phase = ['reading', 'cooldown', 'refilling'].includes(raw?.phase) ? raw.phase : empty.phase;
+            const sourceUrl = normalizeListUrl(raw?.sourceUrl);
+            const capacity = clamp(
+                Math.floor(Number(raw?.capacity) || settings.queueLimit),
+                CONFIG.queueMinItems,
+                CONFIG.queueMaxItems
+            );
+            const totalLimit = clamp(
+                Math.max(items.length, Math.floor(Number(raw?.totalLimit) || settings.queueSessionLimit)),
+                CONFIG.queueSessionMinItems,
+                CONFIG.queueSessionMaxItems
+            );
 
             return {
-                active: Boolean(raw?.active) && items.length > 0 && !stale,
+                active: Boolean(raw?.active) && !stale && Boolean(sourceUrl)
+                    && (items.length > 0 || phase === 'refilling'),
                 items,
-                index: clamp(Math.floor(Number(raw?.index) || 0), 0, Math.max(0, items.length - 1)),
-                phase: ['reading', 'cooldown'].includes(raw?.phase) ? raw.phase : empty.phase,
-                sourceUrl: normalizeListUrl(raw?.sourceUrl),
+                index: clamp(Math.floor(Number(raw?.index) || 0), 0, items.length),
+                phase,
+                sourceUrl,
+                capacity,
+                totalLimit,
                 startedAt: Number(raw?.startedAt) || 0,
                 updatedAt,
                 cooldownRemainingMs: clamp(
-                    Number(raw?.cooldownRemainingMs) || CONFIG.queueCooldownMs,
+                    Number.isFinite(Number(raw?.cooldownRemainingMs))
+                        ? Number(raw.cooldownRemainingMs)
+                        : CONFIG.queueCooldownMs,
                     0,
                     CONFIG.queueCooldownMs
                 )
@@ -3760,23 +3985,30 @@
         let navigationTimer = null;
         let cooldownLastAt = 0;
         let lastCooldownSaveSecond = -1;
+        let refillGeneration = 0;
 
         function currentItem() {
             return session.items[session.index] || null;
         }
 
         function queueLabel() {
-            return session.items.length > 0
-                ? `队列 ${Math.min(session.index + 1, session.items.length)}/${session.items.length}`
-                : '队列未建立';
+            if (!session.active) {
+                return '队列未建立';
+            }
+            const completed = Math.min(
+                session.items.length,
+                session.index + (session.phase === 'cooldown' ? 1 : 0)
+            );
+            return `已读 ${completed} · 待读 ${session.items.length - completed}`;
         }
 
         function save() {
             session = QueueStorage.save(session);
-            setQueueActiveUi(session.active);
+            setQueueActiveUi(session.active, session.capacity, session.totalLimit);
         }
 
         function cancelTimers() {
+            refillGeneration += 1;
             if (cooldownFrame !== null) {
                 cancelAnimationFrame(cooldownFrame);
                 cooldownFrame = null;
@@ -3787,10 +4019,194 @@
             }
         }
 
+        function onSourceList() {
+            if (!isListRoute() || !session.sourceUrl) {
+                return false;
+            }
+            const source = new URL(session.sourceUrl);
+            return window.location.origin === source.origin && window.location.pathname === source.pathname;
+        }
+
+        function listRows() {
+            return document.querySelectorAll('.topic-list-item, .latest-topic-list-item');
+        }
+
+        function listFingerprint() {
+            const rows = listRows();
+            const last = rows[rows.length - 1];
+            return `${rows.length}:${last?.getAttribute('data-topic-id') || last?.querySelector('a.title')?.href || ''}`;
+        }
+
+        function listLoadSentinel() {
+            const rows = listRows();
+            const last = rows[rows.length - 1];
+            return [...document.querySelectorAll('.load-more-sentinel')].find((element) =>
+                !element.closest('.post-stream')
+                && (!last || Boolean(last.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING))
+            ) || null;
+        }
+
+        function waitForListChange(predicate, timeoutMs) {
+            if (predicate()) {
+                return Promise.resolve(true);
+            }
+            return new Promise((resolve) => {
+                const finish = (changed) => {
+                    observer.disconnect();
+                    clearTimeout(timer);
+                    resolve(changed);
+                };
+                const observer = new MutationObserver(() => {
+                    if (predicate()) {
+                        finish(true);
+                    }
+                });
+                const timer = window.setTimeout(() => finish(false), timeoutMs);
+                observer.observe(document.body, { childList: true, subtree: true });
+            });
+        }
+
+        function waitUntilVisible() {
+            if (!document.hidden) {
+                return Promise.resolve();
+            }
+            return new Promise((resolve) => {
+                const resume = () => {
+                    if (!document.hidden) {
+                        document.removeEventListener('visibilitychange', resume);
+                        resolve();
+                    }
+                };
+                document.addEventListener('visibilitychange', resume);
+            });
+        }
+
+        async function enterListSentinel(sentinel) {
+            const original = sentinel.style.getPropertyValue('translate');
+            const priority = sentinel.style.getPropertyPriority('translate');
+            // 同一哨兵在追加列表后可能始终留在视口内；先短暂移出再移回，
+            // 让站点自己的 IntersectionObserver 可以继续请求下一批列表。
+            sentinel.style.setProperty('translate', `0 ${Math.max(window.innerHeight * 2, 1200)}px`);
+            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            if (original) {
+                sentinel.style.setProperty('translate', original, priority);
+            } else {
+                sentinel.style.removeProperty('translate');
+            }
+            if (sentinel.isConnected) {
+                sentinel.scrollIntoView({ block: 'end', behavior: 'auto' });
+            }
+        }
+
+        async function refillFromList() {
+            const generation = ++refillGeneration;
+            const stillRefilling = () => generation === refillGeneration
+                && session.active && session.phase === 'refilling' && onSourceList();
+            scrollController.showState('queue', `${queueLabel()} · 正在补充新帖`);
+
+            await waitForListChange(() => listRows().length > 0, 10000);
+            if (!stillRefilling()) {
+                return;
+            }
+
+            let added = 0;
+            let loads = 0;
+            let stalls = 0;
+            while (stillRefilling()) {
+                await waitUntilVisible();
+                if (!stillRefilling()) {
+                    return;
+                }
+
+                const pending = session.items.length - session.index;
+                const needed = Math.min(session.capacity - pending, session.totalLimit - session.items.length);
+                if (needed <= 0) {
+                    break;
+                }
+
+                const seen = new Set(session.items.map((item) => item.id));
+                const candidates = collectTopicsFromList(needed, seen);
+                if (candidates.length > 0) {
+                    session.items.push(...candidates);
+                    added += candidates.length;
+                    save();
+                    scrollController.showState('queue', `${queueLabel()} · 已补充 ${added} 篇`);
+                    continue;
+                }
+
+                const sentinel = listLoadSentinel();
+                if (!sentinel || loads >= CONFIG.queueRefillMaxLoads || stalls >= 2) {
+                    break;
+                }
+
+                const before = listFingerprint();
+                loads += 1;
+                await enterListSentinel(sentinel);
+                if (!stillRefilling()) {
+                    return;
+                }
+                const changed = await waitForListChange(
+                    () => listFingerprint() !== before,
+                    CONFIG.queueListLoadWaitMs
+                );
+                if (!stillRefilling()) {
+                    return;
+                }
+                stalls = changed ? 0 : stalls + 1;
+            }
+
+            if (!stillRefilling()) {
+                return;
+            }
+            if (session.index >= session.items.length) {
+                complete(session.items.length > 0
+                    ? `连续阅读完成 · 共 ${session.items.length} 篇，列表暂无新帖`
+                    : '当前列表没有可阅读的新帖');
+                return;
+            }
+
+            session.phase = 'reading';
+            save();
+            scrollController.showState('queue', `${queueLabel()} · ${added > 0 ? `补充 ${added} 篇` : '继续剩余篇目'}`);
+            navigationTimer = window.setTimeout(navigateToCurrent, 350);
+        }
+
+        function launchRefillFromList() {
+            const startedAt = session.startedAt;
+            refillFromList().catch((error) => {
+                console.warn(`[${APP.name}] 连续阅读补队列失败。`, error);
+                if (session.active && session.phase === 'refilling' && session.startedAt === startedAt) {
+                    stop('连续阅读已停止：补充队列失败，请重试');
+                }
+            });
+        }
+
+        function startRefill() {
+            cancelTimers();
+            session.phase = 'refilling';
+            save();
+            if (onSourceList()) {
+                launchRefillFromList();
+                return;
+            }
+            navigationTimer = window.setTimeout(() => {
+                if (!navigateWithinSite(session.sourceUrl)) {
+                    stop('连续阅读已停止：无法返回原列表补充新帖');
+                }
+            }, 350);
+        }
+
         function navigateToCurrent() {
+            if (!session.active) {
+                return;
+            }
             const item = currentItem();
-            if (!session.active || !item) {
-                complete();
+            if (!item) {
+                if (session.items.length < session.totalLimit) {
+                    startRefill();
+                } else {
+                    complete();
+                }
                 return;
             }
 
@@ -3802,13 +4218,13 @@
             }
         }
 
-        function complete() {
+        function complete(detail = `连续阅读完成 · 共 ${session.items.length} 篇`) {
             const returnUrl = session.sourceUrl;
             cancelTimers();
             session.active = false;
             session.phase = 'idle';
             save();
-            scrollController.showState('done', `连续阅读完成 · 共 ${session.items.length} 篇`);
+            scrollController.showState('done', detail);
 
             if (isTopicRoute() && returnUrl) {
                 navigationTimer = window.setTimeout(() => {
@@ -3867,8 +4283,14 @@
 
                 if (session.cooldownRemainingMs <= 0) {
                     session.index += 1;
-                    if (session.index >= session.items.length) {
+                    if (session.index >= session.totalLimit) {
                         complete();
+                        return;
+                    }
+
+                    const pending = session.items.length - session.index;
+                    if (session.items.length < session.totalLimit && pending <= CONFIG.queueRefillThreshold) {
+                        startRefill();
                         return;
                     }
 
@@ -3896,26 +4318,21 @@
                 return;
             }
 
-            const items = collectTopicsFromList(settings.queueLimit);
-            if (items.length === 0) {
-                scrollController.showState('idle', '当前列表没有可加入队列的未读帖子');
-                return;
-            }
-
             cancelTimers();
             session = {
                 active: true,
-                items,
+                items: [],
                 index: 0,
-                phase: 'reading',
-                sourceUrl: window.location.href,
+                phase: 'refilling',
+                sourceUrl: normalizeListUrl(window.location.href),
+                capacity: settings.queueLimit,
+                totalLimit: settings.queueSessionLimit,
                 startedAt: Date.now(),
                 updatedAt: Date.now(),
                 cooldownRemainingMs: CONFIG.queueCooldownMs
             };
             save();
-            scrollController.showState('queue', `已收集 ${items.length} 篇 · 即将进入第 1 篇`);
-            navigationTimer = window.setTimeout(navigateToCurrent, 700);
+            launchRefillFromList();
         }
 
         function currentTopicMatchesQueue() {
@@ -3925,7 +4342,7 @@
 
         function onRouteReady() {
             session = QueueStorage.load();
-            setQueueActiveUi(session.active);
+            setQueueActiveUi(session.active, session.capacity, session.totalLimit);
 
             if (!session.active) {
                 return false;
@@ -3936,8 +4353,24 @@
             }
 
             if (isListRoute()) {
-                scrollController.showState('queue', `${queueLabel()} · 准备继续`);
-                navigationTimer = window.setTimeout(navigateToCurrent, 700);
+                if (!onSourceList()) {
+                    stop('连续阅读已停止：已离开原列表');
+                    return false;
+                }
+                if (session.phase === 'refilling') {
+                    launchRefillFromList();
+                } else if (session.phase === 'cooldown') {
+                    runCooldown();
+                } else {
+                    scrollController.showState('queue', `${queueLabel()} · 准备继续`);
+                    navigationTimer = window.setTimeout(navigateToCurrent, 700);
+                }
+                return true;
+            }
+
+            if (session.phase === 'refilling' && isTopicRoute()) {
+                scrollController.showState('queue', `${queueLabel()} · 返回列表补充新帖`);
+                navigationTimer = window.setTimeout(() => navigateWithinSite(session.sourceUrl), 350);
                 return true;
             }
 
@@ -3955,7 +4388,7 @@
             return true;
         }
 
-        setQueueActiveUi(session.active);
+        setQueueActiveUi(session.active, session.capacity, session.totalLimit);
 
         return {
             startFromList,
@@ -4172,6 +4605,10 @@
         setQueueLimit(Number(event.currentTarget.value));
     });
 
+    refs.queueSessionLimit.addEventListener('input', (event) => {
+        setQueueSessionLimit(Number(event.currentTarget.value));
+    });
+
     refs.presetButtons.forEach((button) => {
         button.addEventListener('click', () => setSpeed(Number(button.dataset.speed)));
     });
@@ -4325,6 +4762,7 @@
 
     setSpeed(settings.speed, false);
     setQueueLimit(settings.queueLimit, false);
+    setQueueSessionLimit(settings.queueSessionLimit, false);
     setMode(settings.mode, false);
     syncTheme();
     activateCurrentRoute();

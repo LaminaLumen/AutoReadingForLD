@@ -67,17 +67,18 @@
         .meta { color: var(--muted); margin-bottom: 36px; }
         p { margin: 0 0 1.45em; font-family: Georgia, "Noto Serif SC", serif; font-size: 18px; line-height: 1.9; }
 
-        .topic-list-item {
+        .topic-list-item, .latest-topic-list-item {
             display: grid;
             gap: 5px;
             padding: 16px 0;
             border-bottom: 1px solid var(--line);
         }
 
-        .topic-list-item:last-child { border-bottom: 0; }
-        .topic-list-item a { color: var(--ink); font-size: 17px; font-weight: 700; text-decoration: none; }
-        .topic-list-item small { color: var(--muted); }
+        .topic-list-item:last-child, .latest-topic-list-item:last-child { border-bottom: 0; }
+        .topic-list-item a, .latest-topic-list-item a { color: var(--ink); font-size: 17px; font-weight: 700; text-decoration: none; }
+        .topic-list-item small, .latest-topic-list-item small { color: var(--muted); }
         .new-topic { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--accent); }
+        .load-more-sentinel { height: 1px; width: 100%; visibility: hidden; position: relative; }
 
         .topic-post {
             padding: 28px 0 20px;
@@ -107,28 +108,69 @@
         const topicPostCounts = [6, 18, 42, 80, 120, 10, 25, 60, 150, 35, 95, 12];
         const listRoute = /^\/(new|unread|unseen|latest)/.test(location.pathname);
         if (listRoute) {
+            const renderListRows = (start, end) => Array.from({ length: end - start }, (_, offset) => {
+                const index = start + offset;
+                const slot = index % 12;
+                const visited = [1, 4, 8].includes(slot);
+                const unread = ![2, 6, 10].includes(slot);
+                const eligible = unread && !visited;
+                const rowClass = slot === 7 ? 'latest-topic-list-item' : 'topic-list-item';
+                return `
+                    <div class="${rowClass} ${visited ? 'visited' : unread ? 'unseen-topic' : ''}" data-fixture-eligible="${eligible}">
+                        <a class="title raw-topic-link" href="/t/topic/${1001 + index}">
+                            ${unread ? '<span class="badge-notification new-topic"></span>' : ''}测试长帖 ${index + 1}：阅读节奏与排版
+                        </a>
+                        <small>${topicPostCounts[slot] - 1} 条回复 · 刚刚更新</small>
+                    </div>
+                `;
+            }).join('');
             main.innerHTML = `
                 <section class="topic-list">
                     <h1>新帖列表</h1>
                     <p class="meta">用于验证连续阅读模式，不连接真实站点。</p>
-                    ${Array.from({ length: 12 }, (_, index) => `
-                        <div class="topic-list-item unseen-topic">
-                            <a class="title raw-topic-link" href="/t/topic/${1001 + index}">
-                                <span class="new-topic"></span>测试长帖 ${index + 1}：阅读节奏与排版
-                            </a>
-                            <small>${topicPostCounts[index] - 1} 条回复 · 刚刚更新</small>
-                        </div>
-                    `).join('')}
+                    <div data-topic-list>${renderListRows(0, 12)}</div>
                 </section>
+                <div class="load-more-sentinel" data-list-sentinel></div>
             `;
+
+            const listFixture = { loadedRows: 12, loadRequests: [] };
+            window.__readingListFixture = listFixture;
+            let loading = false;
+            const sentinel = document.querySelector('[data-list-sentinel]');
+            const loader = new IntersectionObserver((entries) => {
+                if (!entries[0]?.isIntersecting || loading || listFixture.loadedRows >= 60) {
+                    return;
+                }
+                loading = true;
+                listFixture.loadRequests.push({ loadedRows: listFixture.loadedRows, at: performance.now() });
+                window.setTimeout(() => {
+                    document.querySelector('[data-topic-list]').insertAdjacentHTML(
+                        'beforeend', renderListRows(listFixture.loadedRows, listFixture.loadedRows + 12)
+                    );
+                    listFixture.loadedRows += 12;
+                    loading = false;
+                    if (listFixture.loadedRows >= 60) {
+                        loader.disconnect();
+                        sentinel.remove();
+                    }
+                }, 450);
+            });
+            loader.observe(sentinel);
         } else {
             const topicId = location.pathname.match(/(\d+)/)?.[1] || '1001';
             const topicIndex = Math.max(0, Number(topicId) - 1001);
             const lazyScenario = topicId === '1099';
+            const megaScenario = topicId === '1097';
+            const stalledScenario = topicId === '1096';
+            const chunkScenario = topicId === '1098' || megaScenario;
             const plannedPostCount = lazyScenario
                 ? 6
+                : megaScenario ? 7545
+                : chunkScenario ? 42
+                : stalledScenario ? 42
                 : topicPostCounts[topicIndex % topicPostCounts.length];
             const finalPostCount = lazyScenario ? 42 : plannedPostCount;
+            const initialPostCount = chunkScenario || stalledScenario ? 8 : plannedPostCount;
 
             const renderPosts = (start, end) => Array.from({ length: end - start + 1 }, (_, offset) => {
                 const postNumber = start + offset;
@@ -152,7 +194,12 @@
                 <article class="topic-shell">
                     <h1>测试长帖 ${topicId}：让阅读保持自己的节奏</h1>
                     <div class="meta">视觉与连续阅读行为验证 · 共 <span data-fixture-post-count>${plannedPostCount}</span> 层</div>
-                    <div data-post-stream>${renderPosts(1, plannedPostCount)}</div>
+                    <div class="post-stream" data-post-stream>
+                        ${renderPosts(1, initialPostCount)}
+                        ${lazyScenario || chunkScenario || stalledScenario
+                            ? '<div class="load-more-sentinel"></div>'
+                            : '<div class="post-stream__bottom-boundary"></div>'}
+                    </div>
                 </article>
             `;
 
@@ -160,11 +207,36 @@
                 window.setTimeout(() => {
                     document.querySelector('.topic-progress .total').textContent = String(finalPostCount);
                     document.querySelector('[data-fixture-post-count]').textContent = String(finalPostCount);
-                    document.querySelector('[data-post-stream]').insertAdjacentHTML(
-                        'beforeend',
+                    document.querySelector('.load-more-sentinel').insertAdjacentHTML(
+                        'beforebegin',
                         renderPosts(plannedPostCount + 1, finalPostCount)
                     );
+                    document.querySelector('.load-more-sentinel').outerHTML = '<div class="post-stream__bottom-boundary"></div>';
                 }, 8000);
+            }
+
+            if (chunkScenario) {
+                let loadedCount = initialPostCount;
+                let loading = false;
+                const sentinel = document.querySelector('.load-more-sentinel');
+                const loader = new IntersectionObserver((entries) => {
+                    if (!entries[0]?.isIntersecting || loading || loadedCount >= finalPostCount) {
+                        return;
+                    }
+                    loading = true;
+                    window.__readingFixture.loadRequests.push({ loadedCount, at: performance.now(), scrollY });
+                    window.setTimeout(() => {
+                        const end = Math.min(finalPostCount, loadedCount + 8);
+                        sentinel.insertAdjacentHTML('beforebegin', renderPosts(loadedCount + 1, end));
+                        loadedCount = end;
+                        loading = false;
+                        if (loadedCount >= finalPostCount) {
+                            loader.disconnect();
+                            sentinel.outerHTML = '<div class="post-stream__bottom-boundary"></div>';
+                        }
+                    }, 900);
+                });
+                loader.observe(sentinel);
             }
 
             const reportMode = params.get('report') || 'normal';
@@ -177,7 +249,8 @@
                 delayMs: reportDelayMs,
                 exposureMs: new Map(),
                 reported: [],
-                sentBatches: []
+                sentBatches: [],
+                loadRequests: []
             };
             window.__readingFixture = fixtureReport;
 
