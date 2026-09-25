@@ -171,9 +171,10 @@
                 : topicPostCounts[topicIndex % topicPostCounts.length];
             const finalPostCount = lazyScenario ? 42 : plannedPostCount;
             const initialPostCount = chunkScenario || stalledScenario ? 8 : plannedPostCount;
+            const postOffset = Math.min(3000, Math.max(0, Number(params.get('postOffset')) || 0));
 
             const renderPosts = (start, end) => Array.from({ length: end - start + 1 }, (_, offset) => {
-                const postNumber = start + offset;
+                const postNumber = start + offset + postOffset;
                 return `
                     <section class="topic-post" data-post-id="${postNumber}" data-post-number="${postNumber}">
                         <div class="post-meta">
@@ -241,18 +242,43 @@
 
             const reportMode = params.get('report') || 'normal';
             const reportDelayMs = Math.min(
-                30000,
+                90000,
                 Math.max(500, Number(params.get('reportDelay')) || 2200)
             );
+            const retryDelayMs = Math.min(30000, Math.max(1000, Number(params.get('retryDelay')) || 3000));
             const fixtureReport = {
                 mode: reportMode,
                 delayMs: reportDelayMs,
                 exposureMs: new Map(),
                 reported: [],
                 sentBatches: [],
-                loadRequests: []
+                loadRequests: [],
+                requestStatuses: [],
+                pendingRequests: new Set()
             };
             window.__readingFixture = fixtureReport;
+
+            function sendNativeFixtureTiming(postNumber, attempt = 0) {
+                const limited = reportMode === 'rate-limit-stuck' || attempt === 0;
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `/topics/timings?status=${limited ? 429 : 200}&retryAfter=${Math.ceil(retryDelayMs / 1000)}`);
+                xhr.onloadend = () => {
+                    fixtureReport.requestStatuses.push({ postNumber, status: xhr.status, at: performance.now() });
+                    if (xhr.status === 429 && attempt < 3) {
+                        window.setTimeout(() => sendNativeFixtureTiming(postNumber, attempt + 1), retryDelayMs);
+                        return;
+                    }
+                    if (xhr.status === 200) {
+                        const indicator = document.querySelector(
+                            `.topic-post[data-post-number="${postNumber}"] .read-state:not(.read)`
+                        );
+                        indicator?.classList.add('read');
+                        fixtureReport.reported.push(postNumber);
+                        fixtureReport.sentBatches.push({ posts: [postNumber], at: performance.now() });
+                    }
+                };
+                xhr.send();
+            }
 
             let lastReportSampleAt = performance.now();
             window.setInterval(() => {
@@ -278,7 +304,21 @@
 
                     const exposure = (fixtureReport.exposureMs.get(postNumber) || 0) + delta;
                     fixtureReport.exposureMs.set(postNumber, exposure);
-                    if (reportMode !== 'stuck' && exposure >= reportDelayMs) {
+                    const requiredExposure = reportMode === 'backoff' && postNumber !== postOffset + 2
+                        ? 2200
+                        : reportDelayMs;
+                    if (
+                        ['rate-limit', 'rate-limit-stuck'].includes(reportMode)
+                        && postNumber === postOffset + 2
+                        && exposure >= requiredExposure
+                    ) {
+                        if (!fixtureReport.pendingRequests.has(postNumber)) {
+                            fixtureReport.pendingRequests.add(postNumber);
+                            sendNativeFixtureTiming(postNumber);
+                        }
+                        return;
+                    }
+                    if (reportMode !== 'stuck' && exposure >= requiredExposure) {
                         readState.classList.add('read');
                         fixtureReport.reported.push(postNumber);
                         newlyReported.push(postNumber);

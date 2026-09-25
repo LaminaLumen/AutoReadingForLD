@@ -8,6 +8,17 @@ const scriptUrl = new URL('../Lanyue.user.js', import.meta.url);
 const server = createServer(async (request, response) => {
     try {
         const url = new URL(request.url || '/', `http://${request.headers.host || `127.0.0.1:${port}`}`);
+        if (url.pathname === '/topics/timings' && request.method === 'POST') {
+            const limited = url.searchParams.get('status') === '429';
+            const retryAfterSeconds = Math.min(30, Math.max(1, Number(url.searchParams.get('retryAfter')) || 2));
+            response.writeHead(limited ? 429 : 200, {
+                'Content-Type': 'application/json; charset=utf-8',
+                'Cache-Control': 'no-store',
+                ...(limited ? { 'Retry-After': String(retryAfterSeconds) } : {})
+            });
+            response.end(JSON.stringify(limited ? { error: '站点暂时限流' } : { ok: true }));
+            return;
+        }
         const isUserscript = url.pathname === '/Lanyue.user.js';
         const body = await readFile(isUserscript ? scriptUrl : fixtureUrl);
 

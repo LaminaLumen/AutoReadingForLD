@@ -2,7 +2,7 @@
 // @name         澜阅
 // @name:zh-CN   澜阅 - LINUX DO 沉浸阅读器
 // @namespace    https://github.com/LaminaLumen/Lanyue
-// @version      2.1.2
+// @version      2.1.3
 // @description  让 LINUX DO 长帖按自然节奏缓缓展开，支持当前帖、自动帖与连续阅读。
 // @author       pboy, 澜阅 contributors
 // @license      MIT
@@ -26,7 +26,7 @@
 
     const APP = Object.freeze({
         name: '澜阅',
-        version: '2.1.2',
+        version: '2.1.3',
         rootId: 'lanyue-reader-root',
         storageKey: 'lanyue:settings:v1',
         queueStorageKey: 'lanyue:queue:v1',
@@ -69,15 +69,17 @@
         readStateScanMs: 180,
         readConfirmMinMs: 2800,
         readConfirmMaxMs: 4200,
+        readConfirmRecoveryMs: 120000,
         readConfirmBandTopRatio: 0.08,
         readConfirmBandBottomRatio: 0.32,
         readConfirmMinVisiblePx: 56,
         readConfirmRetryPulseMs: 1600,
-        readConfirmReloadAfterBatches: 2,
-        readConfirmFailureWindowMs: 45000,
-        bottomReportTimeoutMs: 14000,
+        readConfirmKeepAliveMs: 25000,
+        bottomReportTimeoutMs: 120000,
         bottomReportQuietMs: 900,
-        bottomReportRetryPulseMs: 5000,
+        bottomReportRetryPulseMs: 25000,
+        rateLimitHoldMaxMs: 10 * 60 * 1000,
+        recoveryTargetWaitMs: 15000,
         manualPauseGraceMs: 900,
         uiRefreshMs: 120,
         edgePadding: 12,
@@ -101,6 +103,7 @@
         running: { chip: '阅读中', title: '正在向下阅读', detail: '再次点击即可暂停' },
         loading: { chip: '载入', title: '正在衔接后续楼层', detail: '内容就绪后继续阅读' },
         waiting: { chip: '确认中', title: '正在确认阅读记录', detail: '等待站点记录当前楼层' },
+        rateLimited: { chip: '站点限流', title: '阅读已暂缓', detail: '站点拒绝记录，停在当前楼层' },
         recovering: { chip: '恢复', title: '正在恢复阅读记录', detail: '即将从当前楼层继续' },
         queue: { chip: '队列', title: '连续阅读已就绪', detail: '将在当前标签页逐篇阅读' },
         cooldown: { chip: '间隔', title: '这一篇已读完', detail: '稍后进入下一篇' },
@@ -1576,6 +1579,7 @@
 
             .shell[data-state="loading"],
             .shell[data-state="waiting"],
+            .shell[data-state="rateLimited"],
             .shell[data-state="recovering"],
             .shell[data-state="cooldown"],
             .shell[data-state="paused"] {
@@ -1593,6 +1597,7 @@
             .shell[data-state="done"] [data-dock-icon="done"],
             .shell[data-state="loading"] [data-dock-icon="busy"],
             .shell[data-state="waiting"] [data-dock-icon="busy"],
+            .shell[data-state="rateLimited"] [data-dock-icon="busy"],
             .shell[data-state="recovering"] [data-dock-icon="busy"],
             .shell[data-state="cooldown"] [data-dock-icon="busy"] {
                 display: block;
@@ -1609,6 +1614,7 @@
             .shell[data-state="running"] .dock__fluid,
             .shell[data-state="loading"] .dock__fluid,
             .shell[data-state="waiting"] .dock__fluid,
+            .shell[data-state="rateLimited"] .dock__fluid,
             .shell[data-state="recovering"] .dock__fluid,
             .shell[data-state="queue"] .dock__fluid,
             .shell[data-state="cooldown"] .dock__fluid {
@@ -1637,6 +1643,7 @@
             :host([data-dock-fx="fallback"]) .shell[data-state="running"] .dock::before,
             :host([data-dock-fx="fallback"]) .shell[data-state="loading"] .dock::before,
             :host([data-dock-fx="fallback"]) .shell[data-state="waiting"] .dock::before,
+            :host([data-dock-fx="fallback"]) .shell[data-state="rateLimited"] .dock::before,
             :host([data-dock-fx="fallback"]) .shell[data-state="recovering"] .dock::before {
                 background:
                     radial-gradient(circle at 18% 18%, color-mix(in srgb, var(--state-color) 24%, transparent), transparent 35%),
@@ -2550,11 +2557,15 @@
     function dockDetailForState(state) {
         switch (state) {
             case 'running':
-                return `${Math.round(settings.speed)} 像素/秒`;
+                return NativeTimingStatus.speedLimit() < settings.speed
+                    ? `限流后 ${NativeTimingStatus.speedLimit()} 像素/秒`
+                    : `${Math.round(settings.speed)} 像素/秒`;
             case 'loading':
                 return '正在衔接楼层';
             case 'waiting':
-                return '正在确认记录';
+                return NativeTimingStatus.isRateLimited() ? '站点返回 429' : '正在确认记录';
+            case 'rateLimited':
+                return '站点返回 429';
             case 'recovering':
                 return '重载当前楼层';
             case 'queue':
@@ -2573,7 +2584,7 @@
     function renderDockState(state = refs.shell.dataset.state || 'idle') {
         const copy = STATE_COPY[state] || STATE_COPY.idle;
         const detail = dockDetailForState(state);
-        const activeReading = ['running', 'loading', 'waiting'].includes(state);
+        const activeReading = ['running', 'loading', 'waiting', 'rateLimited'].includes(state);
         const recovering = state === 'recovering';
         const queueActionActive = queueUiActive && isListRoute() && settings.mode === 'queue';
         const actionLabel = queueActionActive
@@ -2925,6 +2936,73 @@
 
     let handleScrollDone = () => {};
     let handlePersistentUnread = () => false;
+    let handleRateLimitExhausted = () => {};
+
+    const NativeTimingStatus = (() => {
+        let unresolved429At = 0;
+        let lastStatus = 0;
+        let speedCap = Number.POSITIVE_INFINITY;
+        let speedCapUntil = 0;
+        let limitCount = 0;
+        const processed = new WeakSet();
+
+        const inspect = (entry) => {
+            let url;
+            try {
+                url = new URL(entry.name);
+            } catch {
+                return;
+            }
+            if (url.origin !== window.location.origin || url.pathname !== '/topics/timings') {
+                return;
+            }
+
+            const status = Number(entry.responseStatus) || 0;
+            if (!status || processed.has(entry)) {
+                return;
+            }
+            processed.add(entry);
+            // 只读浏览器提供的同源请求状态元数据；不拦截、代理或发起阅读上报。
+            lastStatus = status;
+            if (status === 429) {
+                unresolved429At ||= performance.now();
+                limitCount += 1;
+                speedCap = limitCount === 1 ? 96 : Math.max(30, Math.round(96 / limitCount));
+                speedCapUntil = performance.now() + 10 * 60 * 1000;
+            } else if (status >= 200 && status < 300) {
+                unresolved429At = 0;
+            }
+        };
+
+        if (typeof PerformanceObserver === 'function') {
+            try {
+                const observer = new PerformanceObserver((list) =>
+                    list.getEntries().sort((left, right) => left.responseEnd - right.responseEnd).forEach(inspect)
+                );
+                observer.observe({ type: 'resource', buffered: true });
+            } catch {
+                // 不支持资源状态时继续依靠蓝点确认，不能据此假定上报成功。
+            }
+        }
+
+        return {
+            isRateLimited() {
+                return unresolved429At > 0;
+            },
+            canResume() {
+                return unresolved429At === 0;
+            },
+            holdElapsedMs() {
+                return unresolved429At ? performance.now() - unresolved429At : 0;
+            },
+            speedLimit() {
+                return performance.now() < speedCapUntil ? speedCap : Number.POSITIVE_INFINITY;
+            },
+            lastStatus() {
+                return lastStatus;
+            }
+        };
+    })();
 
     function nativePostStreamTail() {
         const stream = document.querySelector('.post-stream');
@@ -2957,7 +3035,7 @@
         let bottomWaitElapsedMs = 0;
         let bottomReportElapsedMs = 0;
         let bottomReportQuietElapsedMs = 0;
-        let bottomReportRetryPulsed = false;
+        let bottomReportNextPulseMs = CONFIG.bottomReportRetryPulseMs;
         let currentSpeed = 0;
         let speedMultiplier = 1;
         let nextSpeedVariationAt = 0;
@@ -2972,6 +3050,8 @@
         let readingPlanElapsedMs = 0;
         let nextPlanRefreshAt = 0;
         let viewportConfirmation = null;
+        let rateLimitHolding = false;
+        let rateLimitClearedAt = 0;
         let nextReadStateScanAt = 0;
         let nextReadAheadScanAt = 0;
         let readAheadSentinel = null;
@@ -2981,9 +3061,6 @@
         let streamTail = { sentinel: null, complete: false, lastPostNumber: 0 };
         let streamStallElapsedMs = 0;
         let lastStreamPostNumber = 0;
-        let consecutiveReadStateTimeouts = 0;
-        let lastReadStateTimeoutAt = 0;
-        const attemptedReadPosts = new Set();
 
         function elapsed() {
             return elapsedBeforeRun + (running && activeSince ? performance.now() - activeSince : 0);
@@ -3002,7 +3079,7 @@
             bottomWaitElapsedMs = 0;
             bottomReportElapsedMs = 0;
             bottomReportQuietElapsedMs = 0;
-            bottomReportRetryPulsed = false;
+            bottomReportNextPulseMs = CONFIG.bottomReportRetryPulseMs;
         }
 
         function restoreReadAhead() {
@@ -3139,17 +3216,16 @@
         }
 
         function startViewportConfirmation(numbers) {
-            const freshNumbers = numbers.filter((postNumber) => !attemptedReadPosts.has(postNumber));
-            if (freshNumbers.length === 0) {
+            if (numbers.length === 0) {
                 return false;
             }
 
             viewportConfirmation = {
-                numbers: freshNumbers,
+                numbers,
                 elapsedMs: 0,
-                limitMs: CONFIG.readConfirmMinMs
+                initialWaitMs: CONFIG.readConfirmMinMs
                     + Math.random() * (CONFIG.readConfirmMaxMs - CONFIG.readConfirmMinMs),
-                retryPulsed: false
+                nextPulseAtMs: CONFIG.readConfirmRetryPulseMs
             };
             return true;
         }
@@ -3174,12 +3250,14 @@
                 return false;
             }
 
+            if (document.hidden || !document.hasFocus()) {
+                setState('waiting', `等待页面回到前台 · ${formatPostNumbers(viewportConfirmation.numbers)}`);
+                return true;
+            }
+
             viewportConfirmation.elapsedMs += activeFrameMs;
-            if (
-                !viewportConfirmation.retryPulsed
-                && viewportConfirmation.elapsedMs >= CONFIG.readConfirmRetryPulseMs
-            ) {
-                viewportConfirmation.retryPulsed = true;
+            if (viewportConfirmation.elapsedMs >= viewportConfirmation.nextPulseAtMs) {
+                viewportConfirmation.nextPulseAtMs += CONFIG.readConfirmKeepAliveMs;
                 pulseNativeScroll();
             }
 
@@ -3190,42 +3268,26 @@
             }
 
             if (pendingNumbers.length === 0) {
-                viewportConfirmation.numbers.forEach((postNumber) => attemptedReadPosts.add(postNumber));
                 viewportConfirmation = null;
-                consecutiveReadStateTimeouts = 0;
                 setState('running', readingPlanSummary());
                 return false;
             }
 
             viewportConfirmation.numbers = pendingNumbers;
-            if (viewportConfirmation.elapsedMs >= viewportConfirmation.limitMs) {
-                pendingNumbers.forEach((postNumber) => attemptedReadPosts.add(postNumber));
+            if (viewportConfirmation.elapsedMs >= CONFIG.readConfirmRecoveryMs) {
                 viewportConfirmation = null;
-
-                if (timestamp - lastReadStateTimeoutAt <= CONFIG.readConfirmFailureWindowMs) {
-                    consecutiveReadStateTimeouts += 1;
-                } else {
-                    consecutiveReadStateTimeouts = 1;
-                }
-                lastReadStateTimeoutAt = timestamp;
-
-                if (consecutiveReadStateTimeouts >= CONFIG.readConfirmReloadAfterBatches) {
-                    requestPersistentUnreadRecovery(pendingNumbers);
-                    return true;
-                }
-
-                setState('running', readingPlanSummary());
-                return false;
+                requestPersistentUnreadRecovery(pendingNumbers);
+                return true;
             }
 
-            const remainingSeconds = Math.max(
-                1,
-                Math.ceil((viewportConfirmation.limitMs - viewportConfirmation.elapsedMs) / 1000)
-            );
-            setState(
-                'waiting',
-                `正在确认 ${formatPostNumbers(pendingNumbers)} · 最多还需 ${remainingSeconds} 秒`
-            );
+            if (viewportConfirmation.elapsedMs < viewportConfirmation.initialWaitMs) {
+                setState('waiting', `正在确认 ${formatPostNumbers(pendingNumbers)}`);
+            } else {
+                const remainingSeconds = Math.ceil(
+                    (CONFIG.readConfirmRecoveryMs - viewportConfirmation.elapsedMs) / 1000
+                );
+                setState('waiting', `站点尚未确认 ${formatPostNumbers(pendingNumbers)} · 等待原生重试 ${remainingSeconds} 秒`);
+            }
             return true;
         }
 
@@ -3278,9 +3340,13 @@
         }
 
         function readingPlanSummary() {
-            return readingPlan
+            const plan = readingPlan
                 ? `连续阅读 · ${readingPlan.postCount} 层 · 至少 ${formatReadingDuration(readingPlan.minimumMs)}`
                 : '';
+            const speedLimit = NativeTimingStatus.speedLimit();
+            return speedLimit < settings.speed
+                ? `${plan ? `${plan} · ` : ''}站点限流后暂缓至 ${speedLimit} 像素/秒`
+                : plan;
         }
 
         function readingPlanWaitingDetail() {
@@ -3360,6 +3426,8 @@
             currentSpeed = 0;
             scrollRemainder = 0;
             viewportConfirmation = null;
+            rateLimitHolding = false;
+            rateLimitClearedAt = 0;
             nextReadStateScanAt = 0;
             nextReadAheadScanAt = 0;
             restoreReadAhead();
@@ -3394,6 +3462,47 @@
             const deltaSeconds = clamp(frameGapMs / 1000, 0, 0.08);
             const activeFrameMs = document.hidden ? 0 : Math.min(frameGapMs, 250);
             lastFrameAt = timestamp;
+            if (NativeTimingStatus.isRateLimited()) {
+                if (!rateLimitHolding) {
+                    rateLimitHolding = true;
+                }
+                rateLimitClearedAt = 0;
+                currentSpeed = 0;
+                scrollRemainder = 0;
+                if (NativeTimingStatus.holdElapsedMs() >= CONFIG.rateLimitHoldMaxMs) {
+                    const detail = '站点持续拒绝阅读记录（429），已停在当前帖';
+                    stop('paused', detail);
+                    queueMicrotask(() => handleRateLimitExhausted(detail));
+                    return;
+                }
+                const remainingMinutes = Math.ceil(
+                    (CONFIG.rateLimitHoldMaxMs - NativeTimingStatus.holdElapsedMs()) / 60000
+                );
+                setState('rateLimited', `站点返回 429，已停在当前楼层 · 等待原生重试，最多 ${remainingMinutes} 分钟`);
+                renderStats(false, timestamp);
+                frameId = requestAnimationFrame(tick);
+                return;
+            }
+            if (rateLimitHolding) {
+                rateLimitClearedAt ||= timestamp;
+                const pendingNumbers = visibleUnreadPostNumbers(false);
+                if (pendingNumbers.length > 0) {
+                    currentSpeed = 0;
+                    scrollRemainder = 0;
+                    if (timestamp - rateLimitClearedAt >= CONFIG.readConfirmRecoveryMs) {
+                        const detail = `站点限流解除后仍未确认 ${formatPostNumbers(pendingNumbers)}，已停在当前帖`;
+                        stop('paused', detail);
+                        queueMicrotask(() => handleRateLimitExhausted(detail));
+                        return;
+                    }
+                    setState('waiting', `限流已解除 · 正在确认 ${formatPostNumbers(pendingNumbers)}`);
+                    renderStats(false, timestamp);
+                    frameId = requestAnimationFrame(tick);
+                    return;
+                }
+                rateLimitHolding = false;
+                rateLimitClearedAt = 0;
+            }
             // 连续阅读计划只累计可见页面中的有效运行时间，暂停或后台节流时间不会被算入。
             if (readingPlan) {
                 readingPlanElapsedMs += activeFrameMs;
@@ -3414,7 +3523,7 @@
 
             // 只有原生正文流确认已加载到末楼，页面剩余高度才可用于整篇限速。
             // 长帖尚有成千上万楼未加载时，用当前十几楼的高度摊总时长会把高速档压成爬行。
-            const requestedSpeed = settings.speed * speedMultiplier;
+            const requestedSpeed = Math.min(settings.speed * speedMultiplier, NativeTimingStatus.speedLimit());
             const remainingPlanMs = readingPlanRemainingMs();
             const paceLimit = readingPlan && tail.complete && remainingPlanMs > 0
                 ? Math.max(1, before.remaining / Math.max(remainingPlanMs / 1000, 0.001))
@@ -3479,21 +3588,21 @@
                 viewportConfirmation = null;
                 scrollRemainder = 0;
                 bottomWaitElapsedMs += activeFrameMs;
-                bottomReportElapsedMs += activeFrameMs;
+                const reportFrameMs = document.hasFocus() ? activeFrameMs : 0;
+                bottomReportElapsedMs += reportFrameMs;
 
                 const visibleUnreadNumbers = visibleUnreadPostNumbers(false);
                 if (visibleUnreadNumbers.length === 0) {
-                    bottomReportQuietElapsedMs += activeFrameMs;
+                    bottomReportQuietElapsedMs += reportFrameMs;
                 } else {
                     bottomReportQuietElapsedMs = 0;
                 }
 
                 if (
                     visibleUnreadNumbers.length > 0
-                    && !bottomReportRetryPulsed
-                    && bottomReportElapsedMs >= CONFIG.bottomReportRetryPulseMs
+                    && bottomReportElapsedMs >= bottomReportNextPulseMs
                 ) {
-                    bottomReportRetryPulsed = true;
+                    bottomReportNextPulseMs += CONFIG.bottomReportRetryPulseMs;
                     pulseNativeScroll();
                 }
 
@@ -3508,14 +3617,14 @@
                     return;
                 }
 
-                if (completionReady && reportTimedOut && visibleUnreadNumbers.length > 0) {
+                if (reportTimedOut && visibleUnreadNumbers.length > 0) {
                     requestPersistentUnreadRecovery(visibleUnreadNumbers);
                     return;
                 }
 
-                const reportWaitingDetail = reportTimedOut
-                    ? `站点仍未确认 · ${formatPostNumbers(visibleUnreadNumbers)} · 计划结束后恢复`
-                    : `等待站点记录 · ${formatPostNumbers(visibleUnreadNumbers)} · 最多 ${Math.ceil((CONFIG.bottomReportTimeoutMs - bottomReportElapsedMs) / 1000)} 秒`;
+                const reportWaitingDetail = !document.hasFocus()
+                    ? `等待页面回到前台 · ${formatPostNumbers(visibleUnreadNumbers)}`
+                    : `等待站点原生重试 · ${formatPostNumbers(visibleUnreadNumbers)} · ${Math.ceil((CONFIG.bottomReportTimeoutMs - bottomReportElapsedMs) / 1000)} 秒`;
                 setState(
                     'waiting',
                     visibleUnreadNumbers.length > 0
@@ -3538,6 +3647,11 @@
 
         function start(plan) {
             if (running || !isTopicRoute()) {
+                return;
+            }
+
+            if (!NativeTimingStatus.canResume()) {
+                setState('paused', '站点仍在限流（429），请等待原生请求恢复');
                 return;
             }
 
@@ -3596,9 +3710,6 @@
             nextReadAheadScanAt = 0;
             streamStallElapsedMs = 0;
             lastStreamPostNumber = 0;
-            consecutiveReadStateTimeouts = 0;
-            lastReadStateTimeoutAt = 0;
-            attemptedReadPosts.clear();
             stop('idle');
             distance = 0;
             elapsedBeforeRun = 0;
@@ -4412,6 +4523,11 @@
     }
 
     const queueManager = createQueueManager();
+    handleRateLimitExhausted = (detail) => {
+        if (queueManager.isActive()) {
+            queueManager.stop(detail);
+        }
+    };
     handleScrollDone = () => {
         ReadRecovery.clear();
         queueManager.onTopicDone();
@@ -4474,6 +4590,40 @@
         });
     }
 
+    function waitForRecoveryTarget(postNumber, timeoutMs = CONFIG.recoveryTargetWaitMs) {
+        if (!postNumber) {
+            return Promise.resolve(true);
+        }
+
+        return new Promise((resolve) => {
+            let settled = false;
+            const selector = `.post-stream > [data-post-number="${postNumber}"]`;
+            const finish = (ready) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                observer.disconnect();
+                clearTimeout(timeoutId);
+                resolve(ready);
+            };
+            const inspect = () => {
+                const post = document.querySelector(selector);
+                if (!post) {
+                    return;
+                }
+                if (post.querySelector('.read-state')) {
+                    post.scrollIntoView({ block: 'center', behavior: 'auto' });
+                    finish(true);
+                }
+            };
+            const observer = new MutationObserver(inspect);
+            const timeoutId = window.setTimeout(() => finish(false), timeoutMs);
+            observer.observe(document.body, { childList: true, subtree: true });
+            inspect();
+        });
+    }
+
     let routeActivation = 0;
     let pendingVisibleAutoStart = false;
     let resumeAfterVisibilityPause = false;
@@ -4503,7 +4653,8 @@
         }
 
         const shouldStartQueue = queueManager.shouldAutoStartCurrentTopic();
-        const shouldResumeRecovery = ReadRecovery.shouldResumeCurrent();
+        const recovery = ReadRecovery.syncCurrentRoute();
+        const shouldResumeRecovery = Boolean(recovery?.resume);
         const shouldStart = shouldStartQueue
             || shouldResumeRecovery
             || (!queueManager.isActive() && settings.mode === 'auto');
@@ -4534,7 +4685,26 @@
             return;
         }
 
+        if (!NativeTimingStatus.canResume()) {
+            scrollController.showState('paused', '站点仍在限流（429），已停在当前帖');
+            return;
+        }
+
         if (shouldResumeRecovery) {
+            const targetReady = await waitForRecoveryTarget(recovery.targetPostNumber);
+            if (activation !== routeActivation || !isTopicRoute()) {
+                return;
+            }
+            if (!targetReady) {
+                ReadRecovery.clear();
+                const detail = '重载后未能定位到待确认楼层，已停在当前帖';
+                if (queueManager.isActive()) {
+                    queueManager.stop(detail);
+                } else {
+                    scrollController.showState('paused', detail);
+                }
+                return;
+            }
             ReadRecovery.markResumeStarted();
         }
         scrollController.start(shouldStartQueue ? createQueueReadingPlan() : null);

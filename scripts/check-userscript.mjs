@@ -54,7 +54,8 @@ if (!metadataVersion || metadataVersion !== runtimeVersion || metadataVersion !=
 rejectMatch(/^\/\/\s+@match\s+https:\/\/linux\.do\/\*$/m, '禁止使用覆盖全站的宽泛 @match');
 rejectMatch(/^\/\/\s+@(?:connect|require|resource)\b/m, '禁止声明跨域连接或远程资源权限');
 rejectMatch(/\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(/, '发现网络请求 API，请确认是否超出项目边界');
-rejectMatch(/\/topics\/timings/, '禁止脚本直接调用 Discourse 阅读上报接口');
+requireMatch(/PerformanceObserver/, '缺少原生阅读请求状态的被动观察');
+requireMatch(/NativeTimingStatus\.isRateLimited\(\)/, '缺少 429 限流时的滚动保护');
 rejectMatch(/\bGM(?:\.|_)[A-Za-z]/, '发现 GM 特权 API，与 @grant none 约束不符');
 rejectMatch(/\b(?:eval|Function)\s*\(/, '禁止动态执行代码');
 rejectMatch(/localStorage\.clear\s*\(/, '禁止清空整个站点的 localStorage');
